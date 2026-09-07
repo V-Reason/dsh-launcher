@@ -107,10 +107,10 @@ profiles/web/node_modules/
 **插件版本 ↔ DSH 版本配对**：插件 API 随 DSH 演进（如 2026-08-30 起的 0.1.3-alpha.1
 移除 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，旧插件启动即 fail-loud：
 `does not provide an export named 'settingsNamespace'`）。适配动作只在**写入机**（主力机）
-做：按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 迁移/升级插件 → 重新
-`dsh plugin --profile web update <pkg>`（或改 `package.json` 版本）→ `vdsh sync push`；
-副机 `pull` 后 `pnpm install` 即得适配版本。两端 DSH 版本不一致 = 配对破坏，配置无法按
-预期加载；`vdsh doctor` 会体检已安装插件是否仍引用已移除导出。
+做：按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 迁移/升级插件 →
+`vdsh update plugin`（一键更新全部插件依赖；或手动 `dsh plugin --profile web update <pkg>`，
+见 §4）→ `vdsh sync push`；副机 `pull` 后 `pnpm install` 即得适配版本。两端 DSH 版本不一致
+= 配对破坏，配置无法按预期加载；`vdsh doctor` 会体检已安装插件是否仍引用已移除导出。
 
 ---
 
@@ -250,9 +250,11 @@ powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/d
 |---|---|
 | `init` | `git init -b main`（如未初始化）、添加 `origin`（缺 `-RemoteUrl` 报错）、缺失时生成 `.gitignore`（UTF-8 无 BOM）、`fetch origin` 并打印下一步（全新副机 checkout / 已有数据 merge 或 reset --soft） |
 | `push` | 过滤**实际存在**的 allowlist 路径 → `git add -A -- <路径>` → 有暂存才提交（`DSH Sync` 身份）→ `push`（失败自动重试 `push -u origin main`；非快进时提示先 pull） |
-| `pull` | 工作区脏 → 提示先 push（退出码 3）；否则 `fetch` → `merge --ff-only origin/main`，失败分叉走 `merge origin/main`；冲突/无本地提交给出指引（退出码 3） |
-| `status` | 仓库/分支/远端 URL、`HEAD...origin/main` 前后差异、待推送文件预览、最近提交 |
+| `pull` | 工作区脏 → 提示先 push（退出码 3）；否则 `fetch` → 先反馈**远端新增 N 提交 · M 文件**（与 push 反映推送内容对称）→ 快进优先，分叉走常规合并；无更新直接提示「已是最新」并跳过合并；冲突/无本地提交给出指引（退出码 3） |
+| `status` | 分支/远端 URL、`HEAD...origin/main` 前后差异、待推送文件预览、最近提交 |
 | `help` | 打印用法 |
+
+输出风格：步骤 `→ 动作`、成功 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；每命令头部以短目录（`~/.dsh`）显示一次数据目录，不再输出完整路径清单；步骤行在「直接终端」与「经 vdsh（stdout 被捕获）」两种调用下都可见（PS 层动画的 `-Message` 仅直接终端可见）。
 
 > 退出码语义（供 `vdsh --sync` 等调用方区分）：`0` 成功（含「无变更可推送」）；`1` 硬失败
 > （git 命令失败/远端不可达）；`2` 用法错误；`3` 被阻塞（脏工作区、冲突中间态、远端 main 未建立）；

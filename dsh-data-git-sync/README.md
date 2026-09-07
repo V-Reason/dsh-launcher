@@ -63,6 +63,9 @@ sync-dsh.ps1 help                  # 用法说明
 - 动画：经 `vdsh sync push/pull/init` 调用时显示进度动画（与 vdsh 启动同款转轮 + 秒数）；
   直接/菜单调用时，`fetch`/`push`/`merge` 阶段在**交互终端**同样显示（脚本内 runspace 实现），
   输出重定向自动静默；`push`/`pull` 成功时附总耗时。
+- 进度说明：步骤行 `→ 动作` / 成功 `✓ 结果` / 错误 `✗ 原因` / 警告 `⚠ …`。`pull` 会先反馈
+  「远端新增 N 提交 · M 文件」再合并，无更新时提示「已是最新」；数据目录以 `~/.dsh` 短形式
+  显示一次，不输出完整路径清单（明细见 `vdsh sync status`）。
 - 同步范围（allowlist）：`.gitignore`、`sessions/`、`profiles/web/`（node_modules 除外）、
   `storages/`、`attachments/`、`memories/`、`settings.yaml`、`.agent-presets/`（用户插件/预设）、
   `cordis.patch.yml`（全局配置层）；不存在自动跳过。插件与插件配置的同步矩阵见

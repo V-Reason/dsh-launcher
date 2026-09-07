@@ -8,12 +8,13 @@
   - 在这里注册一行即对 CLI 可见：`vdsh <NAME> [args...]`。
 """
 
-from . import build, config, doctor, setup, sync
+from . import build, config, doctor, setup, sync, update
 from . import launch as launch_feature
 
 FEATURES = {
     "build": ("build", build.SUMMARY, build.run),
     "sync": ("sync", sync.SUMMARY, sync.run),
+    "update": ("update", update.SUMMARY, update.run),
     "config": ("config", config.SUMMARY, config.run),
     "setup": ("setup", setup.SUMMARY, setup.run),
     "doctor": ("doctor", doctor.SUMMARY, doctor.run),

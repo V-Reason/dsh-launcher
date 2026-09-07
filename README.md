@@ -26,6 +26,8 @@ vdsh --tailnet xxx.ts.net         # 手机经 Tailscale 访问
 vdsh sync push / pull / status    # 收工前推送 / 开工前拉取 / 查看状态
 vdsh sync init <URL>              # 一次性初始化同步仓库
 vdsh sync remote [set <URL>]      # 查看/设置远端仓库位置
+vdsh update dsh                   # 更新 Harness 本体（git pull + install + build）
+vdsh update plugin [web]          # 更新 profile 插件依赖（update --latest）
 vdsh config                       # 查看生效配置
 vdsh doctor                       # 环境自检
 ```
@@ -48,6 +50,7 @@ vdsh doctor                       # 环境自检
 | `vdsh`（默认） | 启动 dsh web：最小化窗口、就绪检测、工作区注册、打开浏览器 |
 | `vdsh build` | 直接执行仓库构建（问题自动检测亦可），带动画 |
 | `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时 |
+| `vdsh update dsh / plugin` | 更新 Harness 本体 / profile 插件依赖（分开执行） |
 | `vdsh config` / `setup` / `doctor` | 配置查看 / 重跑向导 / 环境自检 |
 
 > 原名 `dsh`，与官方 Harness CLI 冲突已改名；数据同步的完整方法见 `dsh-data-git-sync/docs/`。

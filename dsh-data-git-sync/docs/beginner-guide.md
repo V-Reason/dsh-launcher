@@ -73,14 +73,14 @@ git init --bare T:/DataBase/dsh-sync-repo.git
 # ② 让工具认识储物柜，并生成「黑名单」（防止 API 密钥等被误存）
 powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync\sync-dsh.ps1 init file:///T:/DataBase/dsh-sync-repo.git
 ```
-**预期**：依次看到 `初始化 git 仓库` → `添加 origin` → `生成 .gitignore` → `core.autocrlf = true`。
+**预期**：依次看到 `→ 初始化数据仓库` → `→ 添加远端 origin` → `→ 生成 .gitignore` → `→ core.autocrlf = true`。
 （还会提示「远端还没有 main 分支……先 push」——正常，下一步就建了。）
 
 ```powershell
 # ③ 第一次把 A 的数据存进去（自动建立跟踪）
 powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync\sync-dsh.ps1 push
 ```
-**预期**：最后一行 `✅ 推送完成。`
+**预期**：最后一行 `✓ 完成（0.Xs）`（步骤行可见 `→ 提交 N 个文件`、`→ 推送 origin/main…`）。
 （第一次会看到 `fatal: ... no upstream branch` 的提示——这是正常流程，工具会自动再试 `-u` 建好。）
 
 ```powershell
@@ -135,7 +135,7 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 
 然后**看屏幕提示，二选一**：
 
-- **「数据目录为全新，自动从远端填充数据… → ✅ 已完成」**：说明 B 是台全新电脑，数据已经自动搬进来了，**这条命令到此完成**。
+- **「数据目录为全新，自动从远端填充数据… → ✓ 完成」**：说明 B 是台全新电脑，数据已经自动搬进来了，**这条命令到此完成**。
 - **「本机尚无提交但目录里已有 DSH 数据」**：说明 B 之前自己用过 DSH（有自己的一堆数据）。此时**选一条**：
   - 命令 `git -C "$HOME\.dsh" merge origin/main` —— 把 A 的数据和 B 的数据**合并**（推荐，两边都要）；
   - 命令 `git -C "$HOME\.dsh" reset --soft origin/main` —— 以 A 的数据为准，B 的数据变成「待推送」的新数据。
@@ -146,7 +146,7 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 ```powershell
 powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync\sync-dsh.ps1 status
 ```
-**预期**：`分支: main`、`上游: origin/main`、`待推送: 无`（或列出 B 特有数据，正常）。
+**预期**：`→ 同步状态（~/.dsh）`、`分支: main`、`上游: origin/main — 本地领先 0 提交 / 落后 0 提交`、`待推送: 无`（或列出 B 特有数据，正常）。
 
 **如果 B 是白板机（全新 DSH）**，接入后还有两步（只做一次）：
 1. 在 PowerShell 执行 `cd "$HOME\.dsh\profiles\web"` 再执行 `pnpm install` —— 插件的"依赖包"
@@ -203,7 +203,7 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 | 提示「工作区有未提交变更，先 push」 | `pull` 前本机有未存的新数据 | 先执行 `push`，再 `pull` |
 | 提示「冲突」（merge 报错） | 两台都改了同一份数据（没遵守轮流使用） | **先回滚**：`git -C "$HOME\.dsh" merge --abort`；详细处理见 `docs/native-git-sync.md` 第 6 节 |
 | 提示「远端 origin/main 不存在」 | A 还没推送过 | 去 A 执行一次 `push` |
-| 提示「`fatal: ... no upstream branch`」 | 第一次推送（正常） | 不用管，工具会自动用 `-u` 补建；看到 ✅ 推送完成即成功 |
+| 提示「`fatal: ... no upstream branch`」 | 第一次推送（正常） | 不用管，工具会自动用 `-u` 补建；看到 ✓ 完成即成功 |
 | `status` 显示「待推送: xxx」 | 本机有新增数据（含刚聊的天） | 推送后就没了；如果一直有且不是你产生的，先 `pull` 看远端 |
 | 找不到 `$HOME\.dsh` | 你的 DSH 数据目录可能不是默认位置 | 在 PowerShell 输入 `echo $env:DSH_HOME` 看实际路径；命令里的 `$HOME\.dsh` 就是它 |
 

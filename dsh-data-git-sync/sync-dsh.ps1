@@ -17,6 +17,10 @@
     2 用法错误                   3 被阻塞（脏工作区 / 冲突中间态 / 远端 main 未建立）
     4 未初始化（无仓库 / 无 origin / 数据目录不存在，可跳过）
 
+  输出风格（步骤行在直接终端与经 vdsh 调用时都可见）：
+    步骤 → 动作 ｜ 成功 ✓ 结果 ｜ 错误 ✗ 原因 ｜ 警告 ⚠ 说明
+    push 反映推送内容（提交/文件数），pull 反映拉取内容（远端新增提交/文件数）。
+
 .PARAMETER CommandArgs
   第一个参数为子命令（push / pull / status / init / remote / help），其余为参数：
     init [远程URL]   初始化数据仓库：git init、添加 origin、生成 .gitignore、fetch
@@ -90,6 +94,43 @@ if ($env:VDG_SYNC_TIMEOUT) {
 }
 
 # ---------------------------------------------------------------- 工具函数
+
+function Write-Step {
+    <#
+    .SYNOPSIS
+        步骤行（→ 动作）：与 Invoke-DshGit 的 -Message 不同，此说明在「直接终端」
+        与「经 vdsh（stdout 被捕获）」两种运行方式下都可见——阶段进度不能只藏在
+        PS 层动画的 -Message 里（vdsh 调用时该动画按设计静默）。
+    #>
+    param([string]$Message)
+    Write-Host "→ $Message"
+}
+
+function Write-Ok {
+    <# 成功汇总行（✓ 结果）。#>
+    param([string]$Message)
+    Write-Host "✓ $Message"
+}
+
+function Write-Err {
+    <# 错误行（✗ 原因）。#>
+    param([string]$Message)
+    Write-Host "✗ $Message"
+}
+
+function Get-ShortDir {
+    <#
+    .SYNOPSIS
+        数据目录短形式：位于 $HOME 下时显示为 ~\…（跨机操作时仍能认出是哪台机器，
+        又不占满一行）；其余路径原样返回。
+    #>
+    param([string]$Path)
+    $homeDir = $HOME.TrimEnd('\')
+    if ($Path -and $Path.StartsWith($homeDir + '\')) {
+        return '~' + $Path.Substring($homeDir.Length)
+    }
+    return $Path
+}
 
 function Invoke-DshGit {
     <#
@@ -238,34 +279,35 @@ function Sync-Init {
     #>
     param([string]$RemoteUrl)
 
-    Write-Host "==> DSH 数据目录: $DshHome"
+    Write-Step ('初始化数据仓库（{0}）' -f (Get-ShortDir $DshHome))
 
     # 全新机器：目录可能尚不存在（DSH 首次运行才创建），init 负责引导创建。
     if (-not (Test-Path $DshHome)) {
-        Write-Host '==> 数据目录不存在，正在创建...'
+        Write-Step '数据目录不存在，正在创建…'
         New-Item -ItemType Directory -Force -Path $DshHome | Out-Null
     }
 
     if (-not (Test-IsRepo)) {
-        Write-Host '==> 初始化 git 仓库 (main)...'
+        Write-Step '初始化 git 仓库（main）…'
         if ((Invoke-DshGit @('init', '-b', 'main')) -ne 0) { throw 'git init 失败' }
     } else {
-        Write-Host '==> 已是 git 仓库'
+        Write-Step 'git 仓库已就绪（main）'
     }
 
     $origin = Get-Origin
     if (-not $origin) {
         if (-not $RemoteUrl) {
-            Write-Host '❌ 缺少远程地址。用法: sync-dsh.ps1 init <远程URL>（如 file:///Z:/DataBase/dsh-sync-repo.git）'
+            Write-Err '缺少远程地址。用法: sync-dsh.ps1 init <远程URL>（如 file:///Z:/DataBase/dsh-sync-repo.git）'
             return 2
         }
-        Write-Host "==> 添加 origin $RemoteUrl"
+        Write-Step ('添加远端 origin: {0}' -f $RemoteUrl)
         if ((Invoke-DshGit @('remote', 'add', 'origin', $RemoteUrl)) -ne 0) { throw 'git remote add 失败' }
     } else {
-        Write-Host "==> 已有 origin: $origin"
         if ($RemoteUrl -and $RemoteUrl -ne $origin) {
-            Write-Host "==> 更换 origin: $origin -> $RemoteUrl"
+            Write-Step ('更换 origin: {0} → {1}' -f $origin, $RemoteUrl)
             if ((Invoke-DshGit @('remote', 'set-url', 'origin', $RemoteUrl)) -ne 0) { throw 'git remote set-url 失败' }
+        } else {
+            Write-Step ('远端 origin: {0}' -f $origin)
         }
     }
 
@@ -274,15 +316,15 @@ function Sync-Init {
     $effectiveUrl = if ($RemoteUrl) { $RemoteUrl } else { (Get-Origin) }
     if ($effectiveUrl) {
         $persisted = Set-VdgConfigRemote $effectiveUrl
-        Write-Host ("==> 远端记录: {0}{1}" -f $effectiveUrl, $(if ($persisted) {
-                '（已写入 vdsh.yaml 的 sync.remote）'
+        Write-Host ("→ 远端记录: {0}（{1}）" -f $effectiveUrl, $(if ($persisted) {
+                '已写入 vdsh.yaml 的 sync.remote'
             } else {
-                '（未发现 vdsh.yaml，仅更新 git origin；经 vdsh 调用时自动持久化）'
+                '未发现 vdsh.yaml，仅更新 git origin；经 vdsh 调用时自动持久化'
             }))
     }
 
     if (-not (Test-Path (Join-Path $DshHome '.gitignore'))) {
-        Write-Host '==> 生成 .gitignore（排除规则，会随仓库同步）'
+        Write-Step '生成 .gitignore（排除规则，会随仓库同步）'
         # 用 WriteAllText 写 UTF-8 无 BOM：PS 5.1 的 Set-Content -Encoding UTF8 会带 BOM，
         # git 对 .gitignore 首行的裸 BOM 处理不可靠（首行注释可能失效）。
         $gitignoreContent = @'
@@ -316,29 +358,30 @@ profiles/web/node_modules/
                 $gitignorePath,
                 "`n" + ($missingLines -join "`n") + "`n",
                 [System.Text.UTF8Encoding]::new($false))
-            Write-Host '==> 已按 vdsh.yaml 的 sync.gitignore_extra 补写 .gitignore 缺失行'
+            Write-Step '已按 vdsh.yaml 的 sync.gitignore_extra 补写 .gitignore 缺失行'
         }
     }
 
     # 两端 core.autocrlf 必须一致（默认均 true 即可；若改，两台一起改）。
     $crlf = & git -C $DshHome config core.autocrlf 2>$null
     if (-not $crlf) { $crlf = '(未设置, 默认 true)' }
-    Write-Host "==> core.autocrlf = $crlf（两端保持一致）"
+    Write-Step ('core.autocrlf = {0}（两端保持一致）' -f $crlf)
 
     # 配置概况（供核对 vdsh.yaml 生效值）。
     $originNow = Get-Origin
-    Write-Host ("==> 配置概况: 远端={0} | 同步范围={1} 项 | .gitignore={2}" -f (
+    Write-Step ('配置概况: 远端={0} | 同步范围={1} 项 | .gitignore={2}' -f (
         $(if ($originNow) { $originNow } else { '(未设置)' })),
         $Allowlist.Count,
         $(if (Test-Path (Join-Path $DshHome '.gitignore')) { '已就绪' } else { '缺失（应已在此步生成）' }))
 
+    Write-Step '获取远端数据…'
     if ((Invoke-DshGit @('fetch', 'origin') -Animated -Message '获取远端数据…') -ne 0) {
-        Write-Host '==> 注意: origin 暂不可达（首次初始化可稍后再试）'
+        Write-Host '→ 注意: origin 暂不可达（首次初始化可稍后再试）'
         return 0
     }
 
     if (-not (Test-RemoteMain)) {
-        Write-Host '==> 远端还没有 main 分支：先在主力机执行一次 sync-dsh.ps1 push 建立，或对空裸仓库执行 git push -u origin main。'
+        Write-Host '→ 远端还没有 main 分支：先在主力机执行一次 sync-dsh.ps1 push 建立，或对空裸仓库执行 git push -u origin main。'
         return 0
     }
     $hasHead = (Wait-GitQuiet @('rev-parse', '--verify', '--quiet', 'HEAD')) -eq 0
@@ -348,22 +391,22 @@ profiles/web/node_modules/
         $untracked = & git -C $DshHome status --porcelain --untracked-files=all 2>$null
         $onlyGenerated = ($untracked | Where-Object { $_.Trim() -ne '' -and ($_.Trim() -notmatch '^\?\?\s+\.gitignore$') } | Measure-Object).Count -eq 0
         if ($onlyGenerated) {
-            Write-Host '==> 数据目录为全新，自动从远端填充数据...'
+            Write-Step '数据目录为全新，自动从远端填充数据…'
             if ((Invoke-DshGit @('checkout', '-f', '-b', 'main', 'origin/main')) -ne 0) {
                 Write-Host '   自动切换失败，请手动执行（-f 会用仓库版本覆盖 init 生成的 .gitignore，目录无其它数据，安全）:'
                 Write-Host "    cd $DshHome; git checkout -f -b main origin/main"
             } else {
-                Write-Host '✅ 已完成：远端数据已填入本机，可执行 status 查看。'
+                Write-Ok '完成：远端数据已填入本机，可执行 status 查看。'
             }
         } else {
-            Write-Host '==> 本机尚无提交但目录里已有 DSH 数据（尚未入库），二选一:'
+            Write-Host '→ 本机尚无提交但目录里已有 DSH 数据（尚未入库），二选一:'
             Write-Host "    git merge origin/main                          # 把远端历史并入本地数据"
             Write-Host "    或 git reset --soft origin/main                # 以远端为基线，本地数据作为未提交变更，随后 push"
         }
     } elseif ((Get-DirtyAllowlist).Count -eq 0) {
-        Write-Host '==> 本地已就绪；查看状态: sync-dsh.ps1 status'
+        Write-Step '本地已就绪；查看状态: sync-dsh.ps1 status'
     } else {
-        Write-Host '==> 本机已有 DSH 数据且远端也有历史，请选择:'
+        Write-Host '→ 本机已有 DSH 数据且远端也有历史，请选择:'
         Write-Host "    git merge origin/main                          # 把远端历史并入本地数据"
         Write-Host "    或 git reset --soft origin/main                # 以远端为基线，本地数据作为未提交变更，随后 push"
     }
@@ -372,13 +415,13 @@ profiles/web/node_modules/
 
 function Sync-Push {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host "==> 推送 DSH 数据 ($DshHome)"
+    Write-Step ('推送 DSH 数据（{0}）' -f (Get-ShortDir $DshHome))
     if (-not (Test-IsRepo)) {
-        Write-Host '❌ 尚未初始化。先用: sync-dsh.ps1 init <远程URL>'
+        Write-Err '尚未初始化。先用: sync-dsh.ps1 init <远程URL>'
         return 4
     }
     if (-not (Get-Origin)) {
-        Write-Host '❌ 未配置 origin。用: sync-dsh.ps1 init <远程URL>'
+        Write-Err '未配置 origin。用: sync-dsh.ps1 init <远程URL>'
         return 4
     }
 
@@ -386,22 +429,22 @@ function Sync-Push {
     if ($paths.Count -eq 0) {
         throw '同步清单中没有任何存在的路径（检查 $DSH_HOME 下的 sessions/ 等目录）'
     }
-    Write-Host "==> 暂存: $($paths -join ', ')"
+    Write-Step '暂存变更…'
     $addArgs = @('add', '-A', '--') + $paths
     if ((Invoke-DshGit $addArgs) -ne 0) { throw 'git add 失败' }
 
     $staged = @(& git -C $DshHome diff --cached --name-only -- $paths)
     if ($staged.Count -eq 0) {
-        Write-Host '✅ 没有变更需要推送（工作区与远端一致）。'
+        Write-Ok '无变更可推送（工作区与远端一致）。'
         return 0
     }
 
     $message = 'sync: {0} ({1} 个文件)' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss'), $staged.Count
-    Write-Host "==> 提交: $message"
+    Write-Step ('提交 {0} 个文件（{1}）' -f $staged.Count, $message)
     $commitArgs = @('-c', "user.name=$CommitName", '-c', "user.email=$CommitEmail", 'commit', '-m', $message)
     if ((Invoke-DshGit $commitArgs) -ne 0) { throw 'git commit 失败' }
 
-    Write-Host '==> 推送...'
+    Write-Step '推送 origin/main…'
     if ((Invoke-DshGit @('push') -Animated -Message '推送中…') -ne 0) {
         # 上游未建立（全新远端分支）：带 -u 再试
         if ((Invoke-DshGit @('push', '-u', 'origin', 'main') -Animated -Message '推送中…') -ne 0) {
@@ -409,78 +452,123 @@ function Sync-Push {
             throw 'git push 失败：请确认远端可达（共享盘/内网穿透已挂载）'
         }
     }
-    Write-Host ("✅ 推送完成。 (耗时 {0:N1}s)" -f $sw.Elapsed.TotalSeconds)
+    Write-Ok ('完成（{0:N1}s）' -f $sw.Elapsed.TotalSeconds)
     return 0
 }
 
 function Sync-Pull {
     $sw = [System.Diagnostics.Stopwatch]::StartNew()
-    Write-Host "==> 拉取 DSH 数据 ($DshHome)"
+    Write-Step ('拉取 DSH 数据（{0}）' -f (Get-ShortDir $DshHome))
     if (-not (Test-IsRepo)) {
-        Write-Host '❌ 尚未初始化。先用: sync-dsh.ps1 init <远程URL>'
+        Write-Err '尚未初始化。先用: sync-dsh.ps1 init <远程URL>'
         return 4
     }
     if (-not (Get-Origin)) {
-        Write-Host '❌ 未配置 origin。用: sync-dsh.ps1 init <远程URL>'
+        Write-Err '未配置 origin。用: sync-dsh.ps1 init <远程URL>'
         return 4
     }
 
     $dirty = Get-DirtyAllowlist
     if ($dirty.Count -gt 0) {
         $preview = @($dirty | Select-Object -First 5 | ForEach-Object { $_.Substring(3) })
-        Write-Host "⚠️ 工作区有 $($dirty.Count) 个未提交变更（如 $($preview -join ', ')）。"
-        Write-Host '   先执行 sync-dsh.ps1 push 提交本地变更，再 pull。'
+        Write-Host ("⚠ 工作区有 {0} 个未提交变更（如 {1}）。先执行 push，再 pull。" -f
+            $dirty.Count, ($preview -join ', '))
         return 3
     }
 
-    if ((Invoke-DshGit @('fetch', 'origin') -Animated -Message '拉取远端更新…') -ne 0) {
-        throw 'fetch 失败：请确认远端可达（共享盘/内网穿透已挂载）'
+    Write-Step '获取远端更新…'
+    if ((Invoke-DshGit @('fetch', 'origin') -Animated -Message '获取远端更新…') -ne 0) {
+        throw '获取远端失败：请确认远端可达（共享盘/内网穿透已挂载）'
     }
     if (-not (Test-RemoteMain)) {
-        Write-Host '❌ 远端 origin/main 不存在：请先在主力机执行一次 push。'
+        Write-Err '远端 origin/main 不存在：请先在主力机执行一次 push。'
         return 3
     }
 
-    # 先尝试纯快进（常态：两端交替使用、无分叉）。
-    if ((Invoke-DshGit @('merge', '--ff-only', 'origin/main') -Animated -Message '快进合并…') -eq 0) {
-        Write-Host ("✅ 拉取完成（快进）。 (耗时 {0:N1}s)" -f $sw.Elapsed.TotalSeconds)
-        return 0
-    }
-
-    # 本地无提交（全新副机）。
+    # 本地无提交（全新副机）：不比对差异，直接给指引。
     if ((Wait-GitQuiet @('rev-parse', '--verify', '--quiet', 'HEAD')) -ne 0) {
-        Write-Host '==> 本地还没有提交；全新副机执行:'
+        Write-Step '本地还没有提交；全新副机执行:'
         Write-Host "    cd $DshHome; git checkout -b main origin/main"
         return 3
     }
 
-    # 本地与远端各有提交：常规合并。
-    Write-Host '==> 本地与远端有分叉，尝试常规合并...'
-    $message = 'sync: merge {0}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
-    if ((Invoke-DshGit @('merge', '-m', $message, 'origin/main') -Animated -Message '合并远端历史…') -eq 0) {
-        Write-Host ("✅ 拉取完成（合并）。 (耗时 {0:N1}s)" -f $sw.Elapsed.TotalSeconds)
+    # 远端相对本地的差异（提交数/文件数）→ 进度说明（与 push 的「推送内容」对称）。
+    $statsKnown = $false
+    $ahead = 0; $behind = 0; $fileCount = 0
+    $aheadBehind = (& git -C $DshHome rev-list '--left-right' '--count' 'HEAD...origin/main' 2>$null) | Select-Object -First 1
+    if ($aheadBehind -and (($aheadBehind.Trim()) -match '^(\d+)\s+(\d+)$')) {
+        $ahead = [int]$Matches[1]
+        $behind = [int]$Matches[2]
+        $statsKnown = $true
+    }
+
+    if ($statsKnown -and $behind -eq 0) {
+        # 已是最新：跳过 merge（避免 git 的「Already up to date.」噪音）。
+        if ($ahead -gt 0) {
+            Write-Ok ("已是最新（本地领先远端 {0} 提交，勿忘 push）。" -f $ahead)
+        } else {
+            Write-Ok '已是最新（与远端一致）。'
+        }
+        Write-Host ("  耗时 {0:N1}s" -f $sw.Elapsed.TotalSeconds)
+        return 0
+    }
+    if ($statsKnown) {
+        $fileCount = @(& git -C $DshHome diff --name-only 'HEAD...origin/main' 2>$null |
+            Where-Object { $_.Trim() -ne '' }).Count
+        Write-Step ('远端新增 {0} 提交 · {1} 个文件' -f $behind, $fileCount)
+    } else {
+        Write-Step '远端有更新，开始合并…'
+    }
+
+    # 本地与远端都有提交：常规合并（先于快进尝试，避免先失败再回退的两段噪音）。
+    if ($statsKnown -and $ahead -gt 0) {
+        Write-Step '本地与远端都有新提交，常规合并…'
+        $message = 'sync: merge {0}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+        if ((Invoke-DshGit @('merge', '-m', $message, 'origin/main') -Animated -Message '合并远端历史…') -ne 0) {
+            Write-Host '⚠ 拉取产生冲突（合并未提交，仓库处于冲突中间态）。'
+            Write-Host '   回滚: git merge --abort；解决: 处理冲突后 git add + git commit。'
+            Write-Host '   详见 dsh-data-git-sync/docs/native-git-sync.md「冲突处理」。'
+            return 3
+        }
+        Write-Ok ('拉取完成（合并 · {0} 提交 · {1} 文件 · {2:N1}s）' -f $behind, $fileCount, $sw.Elapsed.TotalSeconds)
         return 0
     }
 
-    Write-Host '⚠️ 拉取产生冲突（合并未提交，仓库处于冲突中间态）。'
-    Write-Host '   处理方式（二选一）：'
-    Write-Host "   1) 回滚:      git -C $DshHome merge --abort"
-    Write-Host '   2) 解决后再提交：二进制/会话文件建议把远端版本另存为 <文件>.remote-fork 再 git add 两侧文件'
-    Write-Host '   详细步骤见 doc/native-git-sync.md 的「冲突处理」章节。'
+    # 常态（一端交替使用、无分叉）：纯快进。
+    Write-Step '快进合并…'
+    if ((Invoke-DshGit @('merge', '--ff-only', 'origin/main') -Animated -Message '快进合并…') -eq 0) {
+        if ($statsKnown) {
+            Write-Ok ('拉取完成（快进 · {0} 提交 · {1} 文件 · {2:N1}s）' -f $behind, $fileCount, $sw.Elapsed.TotalSeconds)
+        } else {
+            Write-Ok ('拉取完成（快进 · {0:N1}s）' -f $sw.Elapsed.TotalSeconds)
+        }
+        return 0
+    }
+
+    # 快进失败（历史无关/极端状态）：再试常规合并。
+    Write-Step '快进不可用，尝试常规合并…'
+    $message = 'sync: merge {0}' -f (Get-Date -Format 'yyyy-MM-ddTHH:mm:ss')
+    if ((Invoke-DshGit @('merge', '-m', $message, 'origin/main') -Animated -Message '合并远端历史…') -eq 0) {
+        Write-Ok ('拉取完成（合并 · {0:N1}s）' -f $sw.Elapsed.TotalSeconds)
+        return 0
+    }
+
+    Write-Host '⚠ 拉取产生冲突（合并未提交，仓库处于冲突中间态）。'
+    Write-Host '   回滚: git merge --abort；解决: 处理冲突后 git add + git commit。'
+    Write-Host '   详见 dsh-data-git-sync/docs/native-git-sync.md「冲突处理」。'
     return 3
 }
 
 function Sync-Status {
-    Write-Host "==> DSH 数据同步状态 ($DshHome)"
+    Write-Step ('同步状态（{0}）' -f (Get-ShortDir $DshHome))
     if (-not (Test-IsRepo)) {
-        Write-Host "❌ $DshHome 不是 git 仓库。先用: sync-dsh.ps1 init <远程URL>"
+        Write-Err ('{0} 不是 git 仓库。先用: sync-dsh.ps1 init <远程URL>' -f $DshHome)
         return 4
     }
 
     $origin = Get-Origin
     $branch = (& git -C $DshHome symbolic-ref --short HEAD 2>$null) | Select-Object -First 1
-    Write-Host ("仓库: {0}" -f $DshHome)
-    Write-Host ("分支: {0}   远端: {1}" -f $(if ($branch) { $branch.Trim() } else { '(尚无提交)' }), $(if ($origin) { $origin } else { '(未配置)' }))
+    Write-Host ('分支: {0}  远端: {1}' -f $(if ($branch) { $branch.Trim() } else { '(尚无提交)' }), $(if ($origin) { $origin } else { '(未配置)' }))
 
     $tracking = $false
     if ((Wait-GitQuiet @('rev-parse', '--verify', '--quiet', 'HEAD')) -eq 0 -and (Test-RemoteMain)) {
@@ -496,8 +584,8 @@ function Sync-Status {
 
     $dirty = Get-DirtyAllowlist
     if ($dirty.Count -gt 0) {
-        $preview = @($dirty | Select-Object -First 10 | ForEach-Object { $_.Substring(3) })
-        Write-Host ("待推送: {0} 个变更（{1}{2}）" -f $dirty.Count, ($preview -join ', '), $(if ($dirty.Count -gt 10) { ' …' } else { '' }))
+        $preview = @($dirty | Select-Object -First 5 | ForEach-Object { $_.Substring(3) })
+        Write-Host ("待推送: {0} 个变更（{1}{2}）" -f $dirty.Count, ($preview -join ', '), $(if ($dirty.Count -gt 5) { ' …' } else { '' }))
     } else {
         Write-Host '待推送: 无'
     }
@@ -587,7 +675,7 @@ function Sync-Remote {
     }
     $origin = Get-Origin
     $configured = Get-VdgConfigRemote
-    Write-Host "==> 远端仓库位置 ($DshHome)"
+    Write-Step ('远端仓库位置（{0}）' -f (Get-ShortDir $DshHome))
     Write-Host ("git origin : {0}" -f $(if ($origin) { $origin } else { '(未配置)' }))
     Write-Host ("vdsh.yaml  : {0}" -f $(if ($configured) { $configured } else { '(未设置)' }))
     if (-not $origin) {

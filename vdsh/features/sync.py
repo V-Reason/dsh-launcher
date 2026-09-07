@@ -7,6 +7,9 @@ sessions/，产生无法收敛的自指残差（先前的 dsh-data-sync 插件�
 因此本功能在 launcher 层直通独立的 sync-dsh.ps1 子工具。
 
 - push/pull/init：长时等待（git fetch/push/merge），捕获输出流式显示 + 动画；
+  pull 由脚本打印阶段行与内容摘要（远端新增 N 提交 · M 文件），与 push 反映
+  推送内容对称；脚本步骤行在「直接终端」与「经 vdsh」两种模式下都可见
+  （PS 层动画的 -Message 仅在直接终端可见，不能作为唯一进度来源）；
 - 无参（交互菜单，内部 Read-Host）、remote / status / help（本地快）：继承 stdio 直通。
   退出码语义透传（0 成功 / 1 硬失败 / 2 用法错误 / 3 被阻塞 / 4 未初始化）。
 

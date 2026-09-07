@@ -10,6 +10,7 @@ vdsh [工作目录]                    启动 dsh web 并打开浏览器（默�
     --sync                        启动服务前自动拉取 DSH 数据（sync pull）
 vdsh build                         直接执行仓库构建（pnpm run build，带动画）
 vdsh sync <子命令>                 数据同步（init/push/pull/status/remote；无参 = 交互菜单）
+vdsh update <dsh | plugin>         更新 Harness 本体 / 更新 profile 插件（分开执行）
 vdsh config                        查看生效配置
 vdsh setup                         重跑首次配置向导
 vdsh doctor                        环境自检（只读）
@@ -90,10 +91,24 @@ vdsh --sync                      # 启动服务前自动 pull（仅实例未运�
 ```
 
 - 设计背景（为什么插件做不到）、同步范围、冲突处理见 `dsh-data-git-sync/docs/native-git-sync.md`；小白教程见 `dsh-data-git-sync/docs/beginner-guide.md`。
+- 输出风格：步骤 `→ 动作`、成功汇总 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；数据目录按 `~/.dsh` 短形式显示一次，不再输出完整路径清单（看明细用 `vdsh sync status`）。`push` 反映推送内容（提交/文件数），`pull` 同样反映拉取内容（远端新增 N 提交 · M 文件），无更新时直接提示「已是最新」并跳过合并。
 - 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 不入库，副机需 `pnpm install`。API 密钥（`.credentials.yaml`）永不入库。
 - 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`；`DSH_HOME` 与 `sync.data_dir` 均支持 `~` 写法，使用时自动展开为主目录绝对路径。
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
 - 规则：**两台电脑不要同时干活**：A 收工 `push` → B 开工 `pull`；DSH 空闲时再同步。
+
+## 更新（vdsh update）
+
+```powershell
+vdsh update dsh                   # 更新 Harness 本体：git fetch + 合并 upstream + pnpm install + build
+vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）：dsh plugin --profile <p> update --latest
+```
+
+- **分开执行**：`dsh` 更新 Harness 检出（`launcher.repo`，须为 git 检出且配置了上游分支）；`plugin` 更新 `$DSH_HOME/profiles/<p>` 的插件依赖（官方 dsh CLI 通路，新版本声明 `dsh.bundle` 会自动激活为 profile 层）。
+- 两者在 **dsh web 运行中**都会询问（`[y/N]`，非交互/EOF 默认中止）：Windows 下运行中的服务会锁定文件，且更新的版本需要重启才生效。
+- `update dsh`：仓库有未提交改动也会询问确认；动作顺序为 fetch → merge（本地有提交时常规合并，冲突中止并提示）→ `pnpm install` → `pnpm run build`，全程带动画，结束显示新旧版本号。
+- `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后提示重启 dsh web，并提醒 `vdsh sync push` 把新的 `package.json`/`pnpm-lock.yaml` 同步给副机。
+- `vdsh doctor` 可体检已安装插件与 DSH 版本是否适配。
 
 ## 退出码（launcher）
 

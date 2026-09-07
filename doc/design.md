@@ -12,6 +12,7 @@
 |---|---|---|
 | 一键启动 dsh web（窗口/进程/就绪/工作区/信任围栏） | vdsh launch | 插件只能挂载在已运行的 Web UI 会话上，无法管理进程与启动期 |
 | 仓库构建检测与执行 | vdsh build | 仓库侧文件与 pnpm 生命周期在 DSH 进程之外 |
+| Harness 本体 / profile 插件更新 | vdsh update（dsh / plugin 分开） | git pull、依赖安装与构建都在 DSH 进程之外；插件更新走官方 dsh CLI 通路 |
 | DSH 数据双机同步 | vdsh sync（直通原生 Git） | 插件方案会让同步命令自身写入 `sessions/`，产生无法收敛的自指残差（旧 `dsh-data-sync` 插件因此作废） |
 | 终端体验（动画/向导/自检/统一配置） | vdsh 共享层 | 纯终端 UX，无需 Web UI |
 
@@ -33,12 +34,13 @@ vdsh/
       launch.py           启动（默认功能）
       build.py            构建
       sync.py             数据同步（直通 sync-dsh.ps1）
+      update.py           更新（dsh 本体 / profile 插件）
       config.py           配置查看
       setup.py            配置向导
       doctor.py           环境自检
 ```
 
-依赖方向：功能层 → 共享层；功能与功能之间**不互相 import**（唯一例外：launch 长驱动按需调用 build/sync 的纯函数，属组合调用而非耦合；doctor 延迟 import launch 的 `probe_harness`）。
+依赖方向：功能层 → 共享层；功能与功能之间**不互相 import**（例外：launch 长驱动按需调用 build/sync 的纯函数、update 延迟 import build/launch 的 `run_build`/`probe_harness`、doctor 延迟 import launch 的 `probe_harness`——均属组合调用而非耦合）。
 
 ### 功能协议
 

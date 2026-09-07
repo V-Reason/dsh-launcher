@@ -126,29 +126,30 @@ VALIDATORS = {
 # 注意：raw 字符串，不能以反斜杠转义开头——首行直接写内容。）
 TEMPLATE = r"""# vdsh.yaml — vdsh 启动器 + DSH 数据同步统一配置
 # 首次运行自动生成；每行都等于当前内置默认值，按需修改即可。
-# 删除某行 = 该键回退内置默认；改完用 `vdsh config` 查看生效值。
-# 优先级：命令行参数 > 环境变量(DSH_REPO/DSH_TAILNET_HOST/DSH_HOME) > 本文件 > 内置默认。
-# 注意：sync.allowlist / sync.gitignore_extra 影响两端共享仓库内容，多机需保持一致。
-launcher:
-  repo: T:\deepseek-harness              # 未设置/留空 → DSH_REPO → 内置默认（无反斜杠转义问题，勿加引号）
-  tailnet: ""                             # 未设置/留空 → DSH_TAILNET_HOST
-  startup_timeout_seconds: 180            # 服务就绪等待上限（秒）
-  starting_budget_seconds: 30             # 端口被占但未就绪时的等待上限（秒）
-  poll_gap_seconds: 0.5                   # 就绪轮询间隔（秒）
-  open_browser: true                      # false = 就绪后不自动打开浏览器（仍打印地址）
-  workspace_seed: true                    # false = 不注入工作区种子插件
-  auto_pull: false                        # true = 每次启动前自动拉取 DSH 数据（等同每次加 --sync）
-animation:
-  fps: 8                                  # TTY 动画帧率（1-60）
-  frames: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"          # 动画帧序列（任意非空字符串）
-sync:
-  data_dir: ""                            # 数据目录；支持 ~ 展开（如 ~/.dsh）；空 = DSH_HOME → ~/.dsh
-  remote: ""                              # 默认远端；vdsh sync init 无参时使用
+# 删除某行 = 该键回退内置默认；改完用 `vdsh config` 查看生效值（含环境变量覆盖）。
+# 优先级：命令行参数 > 环境变量（DSH_REPO / DSH_TAILNET_HOST / DSH_HOME）> 本文件 > 内置默认。
+# 另见：vdsh update dsh / vdsh update plugin（更新 DSH 与插件）、vdsh doctor（环境自检）。
+launcher:                                # 启动行为
+  repo: T:\deepseek-harness              # DSH 安装目录（Harness 仓库根，须含 package.json）；留空 → DSH_REPO → 内置默认（路径勿加引号，避免反斜杠转义）
+  tailnet: ""                            # 手机访问的 Tailscale 域名（可选）；留空 → DSH_TAILNET_HOST
+  startup_timeout_seconds: 180           # 服务就绪等待上限（秒）
+  starting_budget_seconds: 30            # 端口被占但未就绪时的等待上限（秒）
+  poll_gap_seconds: 0.5                  # 就绪轮询间隔（秒）
+  open_browser: true                     # false = 就绪后不自动打开浏览器（仍打印地址）
+  workspace_seed: true                   # false = 不注入工作区种子插件
+  auto_pull: false                       # true = 每次启动前自动拉取 DSH 数据（等同每次加 --sync）
+animation:                               # TTY 转轮动画（重定向/非 TTY 自动静默）
+  fps: 8                                 # 帧率（1-60）
+  frames: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"          # 帧序列（任意非空字符串）
+sync:                                    # DSH 数据同步（vdsh sync / --sync；详见 dsh-data-git-sync/docs/native-git-sync.md）
+  data_dir: ""                           # 数据目录（支持 ~，如 ~/.dsh）；空 = DSH_HOME → ~/.dsh
+  remote: ""                             # 默认远端；vdsh sync init 无参时使用（init / remote set 成功后也会写入）
   allowlist: [.gitignore, sessions, profiles/web, storages, attachments, memories, settings.yaml, .agent-presets, cordis.patch.yml]
-  gitignore_extra: ''                     # 追加到自动生成的 .gitignore（空 = 不追加）
-  commit_name: "DSH Sync"                 # 提交者身份（两端一致）
-  commit_email: "dsh-sync@local"
-  timeout_seconds: 0                      # 0 = 不限时；>0 时 fetch/push 等超过即终止（退出码 1）
+                                         # 同步范围（相对数据目录）；两端须一致；不存在的路径自动跳过
+  gitignore_extra: ''                    # 追加进自动生成的 .gitignore 的排除行（空 = 不追加）
+  commit_name: "DSH Sync"                # 提交者身份（两端一致）
+  commit_email: "dsh-sync@local"         # 同上
+  timeout_seconds: 0                     # 单次 git 操作超时（秒）；0 = 不限时；>0 超时按硬失败退出（码 1）
 """
 
 

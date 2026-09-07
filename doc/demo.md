@@ -61,7 +61,7 @@ vdsh sync init file:///T:/DataBase/dsh-sync-repo.git
 vdsh sync push
 ```
 
-预期：`✅ 推送完成。`；`vdsh sync status` 显示「领先 0 / 落后 0」。
+预期：步骤行依次为 `→ 提交 N 个文件（sync: …）`、`→ 推送 origin/main…`，最后 `✓ 完成（0.Xs）`；`vdsh sync status` 显示「领先 0 / 落后 0」。
 
 > 之后收工前只需 `vdsh sync push`；`vdsh --sync` 启动服务前会自动先 pull（本机有改动时不要用）。
 
@@ -88,10 +88,11 @@ vdsh sync init file:///Z:/DataBase/dsh-sync-repo.git
 预期输出（关键句）：
 
 ```
-==> 数据目录不存在，正在创建...
-==> 生成 .gitignore（排除规则，会随仓库同步）
-==> 数据目录为全新，自动从远端填充数据...
-✅ 已完成：远端数据已填入本机，可执行 status 查看。
+→ 初始化数据仓库（~/.dsh）
+→ 数据目录不存在，正在创建…
+→ 生成 .gitignore（排除规则，会随仓库同步）
+→ 数据目录为全新，自动从远端填充数据…
+✓ 完成：远端数据已填入本机，可执行 status 查看。
 ```
 
 若提示「本机尚无提交但目录里已有 DSH 数据」→ 说明本机启动过 DSH，按
@@ -128,7 +129,7 @@ vdsh
 vdsh sync status
 ```
 
-预期：`分支: main`、`上游: origin/main`、`领先 0 提交 / 落后 0 提交`、`待推送: 无`。
+预期：`→ 同步状态（~/.dsh）`、`分支: main`、`上游: origin/main — 本地领先 0 提交 / 落后 0 提交`、`待推送: 无`。
 
 ---
 
