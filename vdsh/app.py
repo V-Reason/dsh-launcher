@@ -40,12 +40,12 @@ def main():
     console.setup_streams()
     argv = sys.argv[1:]
 
-    # 帮助在任何引导之前处理（首启也不阻塞查看用法）。
-    if not argv or argv[0] in ("-h", "--help", "help"):
+    # 帮助仅在显式请求时显示（vdsh help / -h / --help）；裸 `vdsh` = 默认启动功能。
+    if argv and argv[0] in ("-h", "--help", "help"):
         cli.print_usage()
         sys.exit(0)
 
-    feature_key = argv[0] if argv[0] in FEATURES else None
+    feature_key = argv[0] if argv and argv[0] in FEATURES else None
 
     if feature_key is None:
         # 默认功能（launch）：首次运行 → 交互向导（非交互/跳过 → 默认模板 + 提示）。

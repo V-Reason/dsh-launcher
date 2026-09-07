@@ -63,8 +63,10 @@ sync-dsh.ps1 help                  # 用法说明
 - 动画：经 `vdsh sync push/pull/init` 调用时显示进度动画（与 vdsh 启动同款转轮 + 秒数）；
   直接/菜单调用时，`fetch`/`push`/`merge` 阶段在**交互终端**同样显示（脚本内 runspace 实现），
   输出重定向自动静默；`push`/`pull` 成功时附总耗时。
-- 同步范围（allowlist）：`.gitignore`、`sessions/`、`profiles/web/`、`storages/`、
-  `attachments/`、`memories/`、`settings.yaml`；不存在自动跳过。
+- 同步范围（allowlist）：`.gitignore`、`sessions/`、`profiles/web/`（node_modules 除外）、
+  `storages/`、`attachments/`、`memories/`、`settings.yaml`、`.agent-presets/`（用户插件/预设）、
+  `cordis.patch.yml`（全局配置层）；不存在自动跳过。插件与插件配置的同步矩阵见
+  `docs/native-git-sync.md` §2.3；白板副机接入（含 `pnpm install`、密钥配置）见 §3.2。
 - 排除（随仓库同步的 `.gitignore`）：`.credentials.yaml`、`*.log`、`logs/`、`*.lock`、
   `.dsh-data-sync/`、`llm-*/`、`profiles/node_modules/`。
 - **退出码**（供 `vdsh --sync` 等调用方区分）：`0` 成功；`1` 硬失败；`2` 用法错误；

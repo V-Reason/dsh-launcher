@@ -45,6 +45,7 @@ DEFAULTS = {
         "poll_gap_seconds": POLL_GAP,
         "open_browser": True,
         "workspace_seed": True,
+        "auto_pull": False,
     },
     "animation": {
         "fps": 8,
@@ -56,6 +57,7 @@ DEFAULTS = {
         "allowlist": [
             ".gitignore", "sessions", "profiles/web", "storages",
             "attachments", "memories", "settings.yaml",
+            ".agent-presets", "cordis.patch.yml",
         ],
         "gitignore_extra": "",
         "commit_name": "DSH Sync",
@@ -108,6 +110,7 @@ VALIDATORS = {
     ("launcher", "poll_gap_seconds"): (_valid_pos_number, False),
     ("launcher", "open_browser"): (_valid_bool, False),
     ("launcher", "workspace_seed"): (_valid_bool, False),
+    ("launcher", "auto_pull"): (_valid_bool, False),
     ("animation", "fps"): (_valid_fps, False),
     ("animation", "frames"): (_valid_frames, False),
     ("sync", "data_dir"): (_valid_str, True),
@@ -134,13 +137,14 @@ launcher:
   poll_gap_seconds: 0.5                   # 就绪轮询间隔（秒）
   open_browser: true                      # false = 就绪后不自动打开浏览器（仍打印地址）
   workspace_seed: true                    # false = 不注入工作区种子插件
+  auto_pull: false                        # true = 每次启动前自动拉取 DSH 数据（等同每次加 --sync）
 animation:
   fps: 8                                  # TTY 动画帧率（1-60）
   frames: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"          # 动画帧序列（任意非空字符串）
 sync:
-  data_dir: ""                            # 数据目录；空 = DSH_HOME → ~/.dsh
+  data_dir: ""                            # 数据目录；支持 ~ 展开（如 ~/.dsh）；空 = DSH_HOME → ~/.dsh
   remote: ""                              # 默认远端；vdsh sync init 无参时使用
-  allowlist: [.gitignore, sessions, profiles/web, storages, attachments, memories, settings.yaml]
+  allowlist: [.gitignore, sessions, profiles/web, storages, attachments, memories, settings.yaml, .agent-presets, cordis.patch.yml]
   gitignore_extra: ''                     # 追加到自动生成的 .gitignore（空 = 不追加）
   commit_name: "DSH Sync"                 # 提交者身份（两端一致）
   commit_email: "dsh-sync@local"
@@ -266,8 +270,13 @@ def patch_values(replacements):
 
 
 def effective_data_dir(settings):
-    """DSH 数据目录：DSH_HOME 环境变量 > vdsh.yaml sync.data_dir > None（脚本回退 ~/.dsh）。"""
-    return os.environ.get("DSH_HOME") or settings["sync"]["data_dir"] or None
+    """DSH 数据目录：DSH_HOME 环境变量 > vdsh.yaml sync.data_dir > None（脚本回退 ~/.dsh）。
+
+    两处来源均先展开 ~（os.path.expanduser）并归一化路径，如 ~/.dsh → C:\\Users\\...\\.dsh，
+    保证 doctor / config 报告 / sync 环境桥拿到的都是可直接使用的绝对路径。
+    """
+    value = os.environ.get("DSH_HOME") or settings["sync"]["data_dir"] or None
+    return os.path.normpath(os.path.expanduser(value)) if value else None
 
 
 def config_report(settings):
@@ -291,6 +300,7 @@ def config_report(settings):
     lines.append("  poll_gap_seconds: %s" % launcher["poll_gap_seconds"])
     lines.append("  open_browser: %s" % launcher["open_browser"])
     lines.append("  workspace_seed: %s" % launcher["workspace_seed"])
+    lines.append("  auto_pull: %s" % launcher["auto_pull"])
     lines.append("")
     lines.append("animation:")
     lines.append("  fps: %d" % settings["animation"]["fps"])

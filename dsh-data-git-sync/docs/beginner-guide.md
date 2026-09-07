@@ -27,7 +27,8 @@
 两台电脑都完成下面 4 项才能开始：
 
 - [ ] **两台 Windows 电脑**：本教程称 A = 主力机（数据最多那台），B = 副机。
-- [ ] **两台都装好了 DSH**，并且都**正常使用过**（打开过、聊过天）。
+- [ ] **两台都装好了 DSH**。A 正常使用过（打开过、聊过天）；B 可以是**刚装好的"白板机"**
+      （还没启动过），接入时会自动走「全新目录」分支。
 - [ ] **两台都装了 Git**。检查方法：打开 PowerShell（见第 2 节），输入 `git --version` 回车。
       - 有版本号（如 `git version 2.4x.x`）→ 通过。
       - 报「不是内部或外部命令」→ 在 PowerShell 里执行 `winget install Git.Git` 后重开窗口；
@@ -147,6 +148,12 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 ```
 **预期**：`分支: main`、`上游: origin/main`、`待推送: 无`（或列出 B 特有数据，正常）。
 
+**如果 B 是白板机（全新 DSH）**，接入后还有两步（只做一次）：
+1. 在 PowerShell 执行 `cd "$HOME\.dsh\profiles\web"` 再执行 `pnpm install` —— 插件的"依赖包"
+   不通过同步搬运（太大、跨机器易坏），版本由随同步过来的 `pnpm-lock.yaml` 锁定，装出来和 A 完全一致。
+2. 打开 DSH，在设置里填好 API 密钥（`.credentials.yaml` 永不入库，B 需要自己配一次）。
+   然后启动 DSH 检查：聊天历史、设置、插件/预设都在（比如你 A 上配置的 agent 预设也能看到），就成功了。
+
 ---
 
 ## 6. 日常使用（记住这一句就够了）
@@ -210,8 +217,9 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 【一年一次】换电脑：A 建储物柜 → B init 接入（第 3、4、5 节）
 
 数据目录：  $env:DSH_HOME（默认 C:\Users\你的用户名\.dsh）
-同步范围：  sessions/（聊天） profiles/web/（配置+插件数据） storages/（插件数据）
-            attachments/（附件图） memories/（记忆） settings.yaml（设置）
+同步范围：  sessions/（聊天） profiles/web/（插件+配置，node_modules 各自 pnpm install）
+            .agent-presets/（你自建的 agent 预设/插件组合） cordis.patch.yml（全局配置层）
+            storages/（插件数据） attachments/（附件图） memories/（记忆） settings.yaml（设置）
                 —— 其余自动忽略；.credentials.yaml 永不入库。
 详细文档：docs/native-git-sync.md
 ```

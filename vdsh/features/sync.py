@@ -18,6 +18,7 @@ import json
 import os
 import subprocess
 
+from .. import settings as settings_mod
 from ..config import (
     EXIT_USAGE,
     SYNC_BLOCKED,
@@ -48,12 +49,14 @@ def _command(sync_args):
 def _child_env(settings):
     """构建子进程环境：把 vdsh.yaml 的 sync/animation 配置以 VDG_* 变量写入。
 
-    规则：DSH_HOME 仅当外部未设置且配置了 data_dir 时注入（保持 env 优先）；
+    规则：DSH_HOME 取 effective_data_dir（env 优先、其次 sync.data_dir），
+    并经 ~ 展开为绝对路径后注入（配置与 env 均支持 ~/.dsh 写法）；
     VDG_SYNC_* 始终以配置值覆盖（脚本缺省时无此变量 = 内置默认）。
     """
     env = os.environ.copy()
-    if settings["sync"]["data_dir"] and not env.get("DSH_HOME"):
-        env["DSH_HOME"] = settings["sync"]["data_dir"]
+    data_dir = settings_mod.effective_data_dir(settings)
+    if data_dir:
+        env["DSH_HOME"] = data_dir
 
     allowlist = settings["sync"]["allowlist"]
     if allowlist:

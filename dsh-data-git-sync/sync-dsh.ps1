@@ -1,4 +1,4 @@
-﻿#Requires -Version 5.1
+#Requires -Version 5.1
 <#
 .SYNOPSIS
   DSH 数据同步（原生 Git 方案）：在 DSH 进程之外，用原生 git 命令同步 $DSH_HOME 数据。
@@ -8,7 +8,8 @@
   因此不会产生「同步命令本身写入 sessions/」的自指残差，也不依赖 Web UI。
 
   同步范围（allowlist，相对 $DSH_HOME）：
-    .gitignore  sessions/  profiles/web/  storages/  attachments/  memories/  settings.yaml
+    .gitignore  sessions/  profiles/web/  storages/  attachments/  memories/
+    settings.yaml  .agent-presets/  cordis.patch.yml
   缺失的路径自动跳过；排除规则见 $DSH_HOME/.gitignore（随仓库同步，两端一致）。
 
   退出码（供 vdsh --sync 等调用方分支判断）：
@@ -53,10 +54,14 @@ try {
 # $DSH_HOME：优先环境变量，缺省 ~/.dsh（与 DSH 默认一致）。
 # 经 vdsh 调用时，启动器按 vdsh.yaml 的 sync.data_dir 注入 DSH_HOME（env 仍优先）。
 $DshHome = if ($env:DSH_HOME) { $env:DSH_HOME } else { Join-Path $HOME '.dsh' }
+# 兼容 ~ 写法（如 ~/.dsh）：PS 5.1 下字符串拼接/传给 git 时不会自动展开波浪号。
+if ($DshHome.StartsWith('~')) {
+    $DshHome = Join-Path $HOME $DshHome.Substring(1).TrimStart('\', '/')
+}
 
 # 同步 allowlist（相对 $DSH_HOME）。.gitignore 随同步，保证两端排除规则一致。
 # 经 vdsh 调用时可被 vdsh.yaml 的 sync.allowlist 覆盖（JSON 数组环境变量）。
-$Allowlist = @('.gitignore', 'sessions', 'profiles/web', 'storages', 'attachments', 'memories', 'settings.yaml')
+$Allowlist = @('.gitignore', 'sessions', 'profiles/web', 'storages', 'attachments', 'memories', 'settings.yaml', '.agent-presets', 'cordis.patch.yml')
 if ($env:VDG_SYNC_ALLOWLIST) {
     $parsed = @($env:VDG_SYNC_ALLOWLIST | ConvertFrom-Json)
     # PS 5.1 的 ConvertFrom-Json 对顶层数组输出单个 Object[]（不拆管道），
@@ -271,6 +276,8 @@ logs/
 .dsh-data-sync/
 llm-*/
 profiles/node_modules/
+# profile 依赖的 node_modules 不入库：两端各自 pnpm install（版本由 pnpm-lock.yaml 锁定）
+profiles/web/node_modules/
 '@
         if ($GitIgnoreExtra) {
             $gitignoreContent = $gitignoreContent.TrimEnd() + "`n" + $GitIgnoreExtra.TrimEnd() + "`n"

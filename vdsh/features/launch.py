@@ -277,8 +277,9 @@ def run(argv, settings):
 
     workspace_path = payload["workspace"]
     tailnet = settings_mod.effective_tailnet(payload["tailnet"], settings)
-    auto_pull = payload["auto_pull"]
     launcher_cfg = settings["launcher"]
+    # 启动前自动拉取：CLI --sync 或 launcher.auto_pull（配置项）命中即开启。
+    auto_pull = payload["auto_pull"] or launcher_cfg["auto_pull"]
 
     status = probe_harness()
     if status == "ready":

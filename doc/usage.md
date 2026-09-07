@@ -13,14 +13,14 @@ vdsh sync <子命令>                 数据同步（init/push/pull/status/remot
 vdsh config                        查看生效配置
 vdsh setup                         重跑首次配置向导
 vdsh doctor                        环境自检（只读）
-vdsh --help                        用法
+vdsh help / -h / --help          用法
 ```
 
 ### 启动（launch，默认功能）
 
 | 情况 | 行为 |
 |---|---|
-| 全新启动（端口空闲） | 可选 `--sync` 自动 pull → 按需构建 → 弹最小化 pwsh 窗口启动 → 就绪轮询 → 打开浏览器 |
+| 全新启动（端口空闲） | 可选 `--sync`/`launcher.auto_pull` 自动 pull → 按需构建 → 弹最小化 pwsh 窗口启动 → 就绪轮询 → 打开浏览器 |
 | 实例已在运行 | 注册当前目录到该实例（RPC），打开浏览器，跳过同步与构建 |
 | 端口被占但未就绪 | 等待其完成（默认 30s 预算），而非拉起第二个实例 |
 
@@ -50,11 +50,12 @@ vdsh --help                        用法
 | `launcher.poll_gap_seconds` | 0.5 | 就绪轮询间隔 |
 | `launcher.open_browser` | true | false = 就绪后不自动开浏览器（仍打印地址） |
 | `launcher.workspace_seed` | true | false = 不注入工作区种子插件 |
+| `launcher.auto_pull` | false | true = 每次启动前自动拉取 DSH 数据（等同每次加 `--sync`） |
 | `animation.fps` | 8 | TTY 动画帧率（1-60） |
 | `animation.frames` | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | 动画帧序列 |
-| `sync.data_dir` | （空） | DSH 数据目录；空 = `DSH_HOME` → `~/.dsh` |
+| `sync.data_dir` | （空） | DSH 数据目录；支持 `~` 展开（如 `~/.dsh`）；空 = `DSH_HOME` → `~/.dsh` |
 | `sync.remote` | （空） | 默认远端；`vdsh sync init` 无参时使用；`remote set` 写入此处 |
-| `sync.allowlist` | 7 项列表 | 同步范围（相对数据目录） |
+| `sync.allowlist` | 9 项列表 | 同步范围（相对数据目录）；含用户预设 `.agent-presets/` 与全局配置层 `cordis.patch.yml`，不存在自动跳过 |
 | `sync.gitignore_extra` | （空） | 追加进自动生成的 `.gitignore`；已有文件按缺失行幂等补写 |
 | `sync.commit_name` | `DSH Sync` | 提交者身份（两端必须一致） |
 | `sync.commit_email` | `dsh-sync@local` | 同上 |
@@ -85,10 +86,12 @@ vdsh sync init <URL>             # 一次性初始化（URL 缺省取 sync.remot
 vdsh sync remote [set <URL>]     # 查看/设置远端（更新 git origin 并写入 vdsh.yaml）
 vdsh sync                        # 交互菜单（[1-5] 状态/推送/拉取/初始化/远端）
 vdsh --sync                      # 启动服务前自动 pull（仅实例未运行时；失败只告警）
+                                 # 也可配置 launcher.auto_pull: true 每次启动自动 pull
 ```
 
 - 设计背景（为什么插件做不到）、同步范围、冲突处理见 `dsh-data-git-sync/docs/native-git-sync.md`；小白教程见 `dsh-data-git-sync/docs/beginner-guide.md`。
-- 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`。
+- 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 不入库，副机需 `pnpm install`。API 密钥（`.credentials.yaml`）永不入库。
+- 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`；`DSH_HOME` 与 `sync.data_dir` 均支持 `~` 写法，使用时自动展开为主目录绝对路径。
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
 - 规则：**两台电脑不要同时干活**：A 收工 `push` → B 开工 `pull`；DSH 空闲时再同步。
 

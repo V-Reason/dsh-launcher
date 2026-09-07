@@ -24,10 +24,15 @@
 
 - 两台设备均为 Windows（本方案当前针对 Windows；命令本身是 git，bash 下等价）。
 - 已安装 git 并加入 PATH；已在两台设备安装 DSH（`$DSH_HOME`，默认为 `C:\Users\<用户>\.dsh`）。
+- **两端 DSH 版本一致**：profile 的 bundle 层来自 DSH 安装本体（安装本体不在同步范围内），
+  版本不一致会导致副机配置无法按预期加载。
 - 一个可共享的位置存放**裸仓库**，两台设备都能访问：
   - 主力机本地磁盘裸仓库：`T:/DataBase/dsh-sync-repo.git`（本方案示例路径）；
   - 副机通过网络驱动器访问：把主力机的 `T:\DataBase` 映射为 `Z:`（或 UNC 路径）。
 - 单向使用约定：两台设备**不同时操作**（同步前保证另一台已提交并推送）。
+- **静态同步约定（用途即本场景）**：主力机是唯一写入方（`push`），白板副机只做镜像
+  （`pull`、不 `push`），即「主力机配置 → 副机同款体验」。副机需要本地产生的数据
+  （密钥、模型缓存、匿名 ID）由 DSH 自行生成，不属于镜像内容。
 
 ---
 
@@ -39,15 +44,17 @@
 |---|---|
 | `.gitignore` | 排除规则本身（随仓库同步，两端一致） |
 | `sessions/` | 全部对话记录（JSONL + zstd 帧） |
-| `profiles/web/` | Web Profile 完整配置（含 `node_modules/`） |
+| `profiles/web/` | Web Profile 完整配置（`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`；`node_modules/` 除外，见 §7） |
 | `storages/` | 插件持久化数据 |
 | `attachments/` | 对话内图片/附件的字节 |
 | `memories/` | 长期记忆（如存在） |
-| `settings.yaml` | 全局用户设置 |
+| `settings.yaml` | 全局用户设置（含各插件配置节点） |
+| `.agent-presets/` | 用户自建 agent 预设：`agent.cordis.yml` 组合、`preset.yml` 元数据、附属目录（如 `skills/`）——插件组合/插件配置的一部分（如存在） |
+| `cordis.patch.yml` | `$DSH_HOME` 根的用户补丁层：对所有 profile 生效的插件行配置覆盖（如存在；不存在自动跳过） |
 
-**实现方式**：`git add -A -- <allowlist>`——只暂存这些路径，其余（`llm-*/`、`.agent-presets/`、
-`.anonymous-user-id`、`profiles/node_modules/` 等）不入库。**不存在的路径会自动跳过**
-（脚本已内置过滤；`git add` 对不存在的 pathspec 会直接报错）。
+**实现方式**：`git add -A -- <allowlist>`——只暂存这些路径，其余（`llm-*/`、
+`.anonymous-user-id`、`profiles/node_modules/`、`profiles/web/node_modules/` 等）不入库。
+**不存在的路径会自动跳过**（脚本已内置过滤；`git add` 对不存在的 pathspec 会直接报错）。
 
 ### 2.2 永不入库（`$DSH_HOME/.gitignore`）
 
@@ -60,6 +67,8 @@ logs/
 .dsh-data-sync/
 llm-*/
 profiles/node_modules/
+# profile 依赖的 node_modules 不入库：两端各自 pnpm install（版本由 pnpm-lock.yaml 锁定）
+profiles/web/node_modules/
 ```
 
 说明：
@@ -68,6 +77,32 @@ profiles/node_modules/
 - `*.lock`：进程锁文件。注意 `pnpm-lock.yaml` 以 `.yaml` 结尾，**不受影响**，仍会同步。
 - `.dsh-data-sync/`：已废弃插件的状态目录（防御性保留）。
 - `llm-*/`：模型提供商缓存（如 `llm-deepseek/`），无需同步。
+- `profiles/node_modules/`：DSH 启动时自动重建的「指向安装依赖的符号链接农场」——机器本地产物，必须两端各自生成。
+- `profiles/web/node_modules/`：profile 依赖安装树。不入库（体积与符号链接/junction 均不适合同步），
+  副机首次拉取后在 `profiles/web` 下执行一次 `pnpm install`（`pnpm-lock.yaml` 已随仓库同步，
+  两端依赖完全相同）。如需「零差异镜像」，删除该行并重新 `git add profiles/web` 即可（详见 §7）。
+
+### 2.3 插件与插件配置同步矩阵
+
+「插件」在 DSH 里有几种形态，同步行为不同：
+
+| 形态 | 磁盘位置 | 同步 |
+|---|---|---|
+| Profile npm 插件（`dsh plugin --profile web add <pkg>` 安装） | `profiles/web/package.json` + `pnpm-lock.yaml` + `pnpm-workspace.yaml` | ✅ 随仓库 |
+| 同上安装树 | `profiles/web/node_modules/` | ❌ 两端各自 `pnpm install` |
+| Profile 插件配置层（插件行/配置覆盖） | `profiles/web/cordis.patch.yml` | ✅ 随仓库 |
+| 全局插件配置层（对所有 profile 生效） | `$DSH_HOME/cordis.patch.yml` | ✅ 随仓库（如存在） |
+| 用户 agent 预设（agent.cordis.yml 组合 = 插件行集合） | `.agent-presets/<id>/` | ✅ 随仓库 |
+| 插件运行数据（投影缓存、工作区注册等） | `storages/` | ✅ 随仓库 |
+| 插件相关设置（默认模型、主题、通知、预设选择等） | `settings.yaml` | ✅ 随仓库 |
+| 动态 Cordis 插件（Web UI `cordis_define` 创建） | 无磁盘文件——定义仅存于进程内，重启即失 | ⚠️ 两端都不会持久化，无同步对象 |
+| API 密钥 | `.credentials.yaml` / `.env` | ⛔ 永不入库，副机本地配置 |
+| 模型缓存 / 匿名 ID | `llm-*/`、`.anonymous-user-id` | ⛔ 自动重新生成 |
+| DSH 安装本体（bundle 来源） | `$DSH_HOME` 之外 | ⛔ 副机安装同版本即可 |
+
+动态 Cordis 插件是在当前 DSH 进程里定义的运行时扩展，**不是**「安装到磁盘」的插件——主力机上
+重启也会消失，因此不存在可同步的文件；要让副机获得同样能力，把它的组合写进用户预设
+（`.agent-presets/`，见 §2.1）即可被同步。
 
 ---
 
@@ -96,7 +131,7 @@ cd ~/.dsh
 git init -b main
 git remote add origin file:///T:/DataBase/dsh-sync-repo.git
 # 手工创建 §2.2 的 .gitignore 后：
-git add -A -- .gitignore sessions profiles/web storages attachments memories settings.yaml
+git add -A -- .gitignore sessions profiles/web storages attachments memories settings.yaml .agent-presets cordis.patch.yml
 git -c user.name="DSH Sync" -c user.email="dsh-sync@local" commit -m "sync: 首次提交"
 git push -u origin main
 ```
@@ -106,7 +141,7 @@ git push -u origin main
 
 ### 3.2 副机（映射网络驱动器 `Z:`）
 
-**全新副机（`$DSH_HOME` 为空/新装 DSH）**：
+**白板副机（`$DSH_HOME` 为空/新装同版本 DSH，推荐流程）**：
 
 ```sh
 cd ~/.dsh
@@ -115,6 +150,23 @@ git remote add origin file:///Z:/DataBase/dsh-sync-repo.git
 git fetch origin
 git checkout -b main origin/main        # 把远端数据完整落下
 ```
+
+配套脚本可一步完成（init 会自动识别「全新目录」并 `checkout -b main origin/main`）：
+
+```powershell
+powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/dsh-sync-repo.git
+```
+
+**白板机检清单（顺序重要）**：
+
+1. 安装与主力机**同版本**的 DSH（安装本体不被同步，bundle 来自安装）。
+2. **先不要启动 DSH**——启动会写 `sessions/`，导致下一次 init 判定为「已有数据」而走 merge 分支。
+3. `vdsh sync init <URL>`（或上方的原生命令）→ 远端数据落盘。
+4. `cd ~/.dsh/profiles/web; pnpm install`——`profiles/web/node_modules/` 不入库，版本由已同步的
+   `pnpm-lock.yaml` 锁定，装出来的依赖与主力机完全一致。
+5. 启动 DSH：boot 会自动重建 `profiles/node_modules/`（机器本地的符号链接农场）与其它运行目录。
+6. 在 Web UI 或本地填写 `.credentials.yaml`（API 密钥永不入库，必须副机本地配置）。
+7. `vdsh sync status` 核对：应与远端一致，且能看到主力机的用户预设（roster）与全部设置。
 
 **已有数据的副机（`$DSH_HOME` 已在使用）**：
 
@@ -147,7 +199,7 @@ git -C ~/.dsh rev-list --left-right --count HEAD...origin/main
 git -C ~/.dsh log --oneline -5
 
 # 推送：暂存 → 提交 → 推送
-git -C ~/.dsh add -A -- .gitignore sessions profiles/web storages attachments memories settings.yaml
+git -C ~/.dsh add -A -- .gitignore sessions profiles/web storages attachments memories settings.yaml .agent-presets cordis.patch.yml
 git -C ~/.dsh diff --cached --name-only            # 无输出 = 无变更，无需提交
 git -C ~/.dsh -c user.name="DSH Sync" -c user.email="dsh-sync@local" commit -m "sync: $(Get-Date -Format s)"
 git -C ~/.dsh push
@@ -246,10 +298,11 @@ git -C ~/.dsh commit
   即可得到干净结果；`pull` 前若有脏文件，先 `push`。
 - 原生 Git 不写会话记录，**不会出现插件的自指问题**；但为拿到确定的快照，仍建议避开 DSH
   正在生成回复的瞬间。
-- `profiles/web/` 包含 `node_modules/`（pnpm 在 Windows 上使用 junction）。副机首次检出后建议
-  在 `profiles/web` 下执行一次 `pnpm install` 校验；若 junction 异常，可自行调整：
-  allowlist 只留 `profiles/web/package.json` 与 `pnpm-lock.yaml`，两端各自 `pnpm install`
-  （代价：依赖装取在本地完成，非「零差异」镜像）。
+- `profiles/web/` 的 `node_modules/` **不入库**（`.gitignore` 已排除；pnpm 在 Windows 上使用
+  junction，跨机同步既慢又脆）。副机首次拉取后在 `profiles/web` 下执行一次 `pnpm install`——
+  `pnpm-lock.yaml` 随仓库同步，两端依赖完全一致。若确实需要「零差异镜像」（Windows↔Windows）：
+  从 `.gitignore` 删除 `profiles/web/node_modules/` 行，再 `git add profiles/web && git commit`
+  即可恢复整目录同步；代价是仓库体积与 junction 传输风险。
 
 ---
 
@@ -273,7 +326,8 @@ git -C ~/.dsh commit
 | pull 报冲突 | 按 §6：先 `merge --abort` 回滚，或解决后 `commit` |
 | 检测到 `.credentials.yaml` 被跟踪 | `git rm --cached .credentials.yaml`，并考虑从历史清除（`git filter-repo`），立即更换密钥 |
 | 换行反复翻动（大量 `\r`/`\n` diff） | 两端 `core.autocrlf` 不一致；统一后 `git add --renormalize .` 一次 |
-| 副机 node_modules 异常 | 在 `profiles/web` 下 `pnpm install`；或按 §7 改为只同步清单文件 |
+| 副机 node_modules 缺失/异常 | 属于正常设计（不入库）：在 `profiles/web` 下执行 `pnpm install` |
+| 副机看不到主力机的用户预设 | `.agent-presets/` 未被同步（旧的 allowlist）；两端 `sync.allowlist` 保持一致后重新 `push`/`pull` |
 | 脚本中文乱码/解析失败 | 确保以 `powershell -File`（或 `pwsh`）运行；文件为 UTF-8 BOM 编码 |
 
 ---
