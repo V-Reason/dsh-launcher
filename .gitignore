@@ -1,0 +1,7 @@
+# 生成物 / 本地状态（不入库）
+__pycache__/
+*.pyc
+vdsh.yaml
+seed.yml
+workspace-seed.mjs
+vdsh.yaml.before
