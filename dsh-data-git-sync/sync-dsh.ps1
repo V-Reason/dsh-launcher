@@ -20,6 +20,7 @@
 .PARAMETER CommandArgs
   第一个参数为子命令（push / pull / status / init / remote / help），其余为参数：
     init [远程URL]   初始化数据仓库：git init、添加 origin、生成 .gitignore、fetch
+                      （成功后把远端地址写入 vdsh.yaml 的 sync.remote）
     push             暂存 allowlist 变更 → 提交（DSH Sync 身份）→ 推送
     pull             先尝试快进，必要时常规合并；冲突/脏工作区给出指引
     status           查看 vs 远端的前后差异、待推送文件、最近提交
@@ -252,7 +253,8 @@ function Sync-Init {
         Write-Host '==> 已是 git 仓库'
     }
 
-    if (-not (Get-Origin)) {
+    $origin = Get-Origin
+    if (-not $origin) {
         if (-not $RemoteUrl) {
             Write-Host '❌ 缺少远程地址。用法: sync-dsh.ps1 init <远程URL>（如 file:///Z:/DataBase/dsh-sync-repo.git）'
             return 2
@@ -260,7 +262,23 @@ function Sync-Init {
         Write-Host "==> 添加 origin $RemoteUrl"
         if ((Invoke-DshGit @('remote', 'add', 'origin', $RemoteUrl)) -ne 0) { throw 'git remote add 失败' }
     } else {
-        Write-Host "==> 已有 origin: $(Get-Origin)"
+        Write-Host "==> 已有 origin: $origin"
+        if ($RemoteUrl -and $RemoteUrl -ne $origin) {
+            Write-Host "==> 更换 origin: $origin -> $RemoteUrl"
+            if ((Invoke-DshGit @('remote', 'set-url', 'origin', $RemoteUrl)) -ne 0) { throw 'git remote set-url 失败' }
+        }
+    }
+
+    # 远端地址同步持久化到 vdsh.yaml 的 sync.remote（与 `remote set` 一致）：
+    # 传 URL 用 URL；未传且已存在 origin 时回填 git 里的地址（自愈旧 init 未持久化的情况）。
+    $effectiveUrl = if ($RemoteUrl) { $RemoteUrl } else { (Get-Origin) }
+    if ($effectiveUrl) {
+        $persisted = Set-VdgConfigRemote $effectiveUrl
+        Write-Host ("==> 远端记录: {0}{1}" -f $effectiveUrl, $(if ($persisted) {
+                '（已写入 vdsh.yaml 的 sync.remote）'
+            } else {
+                '（未发现 vdsh.yaml，仅更新 git origin；经 vdsh 调用时自动持久化）'
+            }))
     }
 
     if (-not (Test-Path (Join-Path $DshHome '.gitignore'))) {

@@ -108,7 +108,20 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 
 ## 7. 其它
 
-- **就绪标记**：`window.__DSH_BOOT__` 优先、旧标题 `DeepSeek Harness` 兼容回退——改判定时两者都要考虑。
+- **就绪标记**：`window.__DSH_BOOT__` 优先、旧标题 `DeepSeek Harness` 兼容回退——改判定时两者都要考虑。0.1.3-alpha.1 起新增**认证 URL 行**通道（`dsh web: <url>`，见 7.1），优先级高于 HTTP 探测。
 - **`--patch` 位置**：必须位于 `web` 之后所有 app 参数**之前**（CLI enablePositionalOptions 会把首个位置参数后的选项透传 app）；`--no-open` 与 `--trusted-host` 的相对顺序有注释说明，不要随意调整。
 - **种子文件**：`workspace-seed.mjs`/`seed.yml` 是生成物（gitignored），`ensure_seed_patch` 幂等重建；改种子内容要同时改 `WORKSPACE_SEED_MJS` 常量（源码内的重建源）。
 - **同步脚本缺省值 = 配置默认值**：`vdsh.yaml` 的 DEFAULTS 与 `sync-dsh.ps1` 的硬编码默认（allowlist/身份/帧串）必须一致——两边是同一套语义的不同入口。
+
+### 7.1 DSH 0.1.3-alpha.1 浏览器会话认证（2026-09 适配）
+
+**现象**：`vdsh` 对已运行实例报「端口 3080 已被占用但未识别为 Harness」；全新启动等满超时后报「启动失败」（DSH 实际正常）；浏览器裸 `http://127.0.0.1:3080/` 得到 **401**，正文 `dsh web authentication required; reopen the URL printed by dsh web.`。插件层同源问题见 `$DSH_HOME\_TMP\error.txt` 的 `settingsNamespace`（那是插件适配问题，另一条线）。
+
+**原因（platform 源码）**：8-30 重构后 `dsh web` 对根页面与 `/api` 实施浏览器会话认证（`packages/client/connection/src/browser-auth.ts`）：`GET /?token=<per-process launch token>` → 303 → 干净 `/` + HttpOnly cookie；无 token/无 cookie 一律 401。token 由服务器进程生成，**无法预先得知**；其「URL 行」`dsh web: http://127.0.0.1:3080/?token=…` 在 Loader 树结算后打印到 stdout（`--no-open` 也打印，`printUrl` 默认 true）。
+
+**解决（launcher）**：启动时把 pwsh 命令输出全流重定向到 `%TEMP%\vdsh-web.log` → 轮询截获 URL 行作为就绪信号 → `requests.Session` 跟随 303 完成 token→cookie 交换 → 打开带 token 的 URL（浏览器首访换 cookie）、复用 Session 调 `/api/workspace.create`；`probe_harness` 识别 401 正文为「auth（已在运行）」。已运行实例若由启动器启动，日志里仍是当前进程的 token，可复用；否则只能提示用户用 DSH 窗口打印的 URL。
+
+### 7.2 sync init 不持久化远端（「yaml 没生效」错觉）
+
+**现象**：`vdsh sync init <URL>` 后 `vdsh config` 的 `sync.remote` 仍为空，但 push/pull 全部正常——git `origin` 才是实际来源，vdsh.yaml 的 remote 仅作无参回退，故「没生效」的观感与「正常」并存。
+**解决**：`Sync-Init` 成功后调用 `Set-VdgConfigRemote`（与 `remote set` 同一文本级写入函数，保留注释）；重跑 init 传新 URL 会 set-url；无参 init 从 git origin 回填。两个入口（CLI/菜单）都走同一函数，不会再出现「只改一边」。

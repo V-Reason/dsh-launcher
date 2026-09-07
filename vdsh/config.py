@@ -2,6 +2,7 @@
 """固定环境信息、阈值与退出码的唯一来源。"""
 
 import shutil
+import tempfile
 from pathlib import Path
 
 # 启动器根目录（vdsh/ 包的上一级；与 vdsh_launcher.py 同目录）。
@@ -17,6 +18,14 @@ URL = "http://127.0.0.1:%d/" % PORT
 # 旧标题仅作兼容回退，用于识别仍在运行的旧构建实例。
 BOOT_MARKER = "__DSH_BOOT__"
 TITLE_MARKER = "DeepSeek Harness"
+# 0.1.3-alpha.1（2026-08-30 重构）起，dsh web 对根页面与 /api 实施浏览器会话认证：
+# GET / 无 ?token= 或 cookie → 401，正文含此串（据此识别"已在运行"的实例）。
+AUTH_REQUIRED_MARKER = "dsh web authentication required"
+
+# dsh web 启动日志（stdout/stderr 全流重定向处）：捕获「认证 URL 行」
+# （dsh web: http://127.0.0.1:3080/?token=…，Loader 结算后打印的就绪信号）与
+# DSH 控制台输出（排障时查看）。
+WEB_URL_LOG = Path(tempfile.gettempdir()) / "vdsh-web.log"
 
 CLI_REL = str(Path("apps", "cli", "lib", "bin.js"))
 DIST_REL = str(Path("apps", "web", "dist", "index.html"))

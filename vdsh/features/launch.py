@@ -7,17 +7,21 @@ Tailscale 信任围栏与窗口最小化，都发生在 DSH 进程之外，
 """
 
 import os
+import re
 import shutil
 import socket
 import subprocess
 import sys
 import time
 import uuid
+from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 import requests
 
 from .. import settings as settings_mod
 from ..config import (
+    AUTH_REQUIRED_MARKER,
     BOOT_MARKER,
     CLI_REL,
     EXIT_NO_PWSH,
@@ -31,6 +35,7 @@ from ..config import (
     TCP_TIMEOUT,
     TITLE_MARKER,
     URL,
+    WEB_URL_LOG,
 )
 from ..console import die, say, step, warn
 from ..spinner import Spinner
@@ -91,8 +96,63 @@ def is_harness_page(resp):
     return BOOT_MARKER in resp.text or TITLE_MARKER in resp.text
 
 
+# ── 浏览器会话认证（DSH 0.1.3-alpha.1+）──────────────────────────────────────
+# 新 DSH 对根页面与 /api 实施认证：GET /?token=<per-process launch token> →
+# 303 → 干净 / + Set-Cookie（HttpOnly）；无 token/cookie → 401。
+# 服务器在 Loader 结算后向 stdout 打印 `dsh web: <认证URL>`（--no-open 也打印）
+# 作为就绪信号；启动器把该行捕获到 WEB_URL_LOG 才能完成认证与就绪判定。
+
+def _url_line_from_log(log_path):
+    """从启动日志提取认证 URL（`dsh web: <url>`，含 ?token=）；未就绪返回 None。"""
+    try:
+        path = Path(log_path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"(?m)^\s*dsh web:\s*(\S+)", text)
+    return match.group(1) if match else None
+
+
+def _lan_url_from_log(log_path):
+    """提取日志行中的 LAN 认证 URL（`(LAN: <url>)`），供手机端访问；无则 None。"""
+    try:
+        path = Path(log_path)
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.search(r"\(LAN:\s*(\S+)\)", text)
+    return match.group(1) if match else None
+
+
+def _token_of(url):
+    """从认证 URL 提取 token 查询参数；无则 None。"""
+    if not url:
+        return None
+    try:
+        return parse_qs(urlsplit(url).query).get("token", [None])[0]
+    except ValueError:
+        return None
+
+
+def _auth_session_bootstrap(auth_url):
+    """用认证 URL 完成 token→cookie 交换，返回带 cookie 的 Session；失败返回 None。
+
+    经 GET /?token=… → 303 → / 后 requests 自动带 cookie 跟到页面；
+    旧 DSH 忽略查询参数直接返回页面，同样返回可用 Session（cookie 为空，无害）。
+    """
+    try:
+        session = requests.Session()
+        resp = session.get(auth_url, timeout=POLL_TIMEOUT, proxies={"http": None, "https": None})
+        if resp.status_code == 200 and is_harness_page(resp):
+            return session
+    except requests.RequestException:
+        pass
+    return None
+
+
 def probe_harness():
-    """探测运行状态：'idle' 无监听；'ready' 已是就绪的 Harness；'starting' 端口占用但页面未就绪。"""
+    """探测运行状态：'idle' 无监听；'ready' 200+引导清单；'auth' 新 DSH 已在运行
+    （浏览器会话认证返回 401 正文）；'starting' 端口占用但页面未就绪。"""
     try:
         with socket.create_connection(("127.0.0.1", PORT), timeout=TCP_TIMEOUT):
             pass
@@ -102,42 +162,65 @@ def probe_harness():
         resp = http_get(URL)
         if resp.status_code == 200 and is_harness_page(resp):
             return "ready"
+        if resp.status_code == 401 and AUTH_REQUIRED_MARKER in resp.text:
+            return "auth"
     except requests.RequestException:
         pass
     return "starting"
 
 
-def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None):
-    """轮询直到 Harness 页面就绪（返回 True）或超时（返回 False）。
+def _http_ready():
+    """旧式 HTTP 就绪判定：200 + 引导清单（无认证的旧 DSH）。"""
+    try:
+        resp = http_get(URL)
+        return resp.status_code == 200 and is_harness_page(resp)
+    except requests.RequestException:
+        return False
 
-    期间显示 spinner（与启动同风格）；就绪后先停止动画，再调用 on_ready()
-    （其中多为打印收尾文案/打开浏览器），保证输出顺序与旧版一致。
+
+def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_path=None):
+    """轮询直到 Harness 就绪；返回就绪信息 dict（或 None=超时）。
+
+    ready = {'authed_url': str|None, 'session': Session|None, 'lan_url': str|None}
+    log_path 提供时优先等 DSH 进程打印的 `dsh web: <认证URL>` 行——0.1.3-alpha.1
+    起该行是平台自身的就绪信号（Loader 结算后才打印），拿到后再经 token→cookie
+    交换校验页面；无 URL 行回退旧式 HTTP 探测（兼容无认证的旧 DSH）。
+    就绪后先停止动画，再调用 on_ready(ready)。
     """
     spinner = Spinner(spinner_message)
     spinner.start()
-    found = False
+    ready = None
     waited = 0.0
     try:
         while deadline is None or waited < deadline:
-            try:
-                resp = http_get(URL)
-                if resp.status_code == 200 and is_harness_page(resp):
-                    found = True
+            if log_path is not None:
+                auth_url = _url_line_from_log(log_path)
+                if auth_url is not None:
+                    session = _auth_session_bootstrap(auth_url)
+                    if session is not None:
+                        ready = {"authed_url": auth_url, "session": session,
+                                 "lan_url": _lan_url_from_log(log_path)}
+                        break
+                elif _http_ready():
+                    ready = {"authed_url": None, "session": None, "lan_url": None}
                     break
-            except requests.RequestException:
-                pass  # 网络未就绪，仅计为一次失败
+            elif _http_ready():
+                ready = {"authed_url": None, "session": None, "lan_url": None}
+                break
             time.sleep(gap)
             waited += gap
     finally:
         spinner.finish()
-    if found and on_ready is not None:
-        on_ready()
-    return found
+    if ready is not None and on_ready is not None:
+        on_ready(ready)
+    return ready
 
 
-def register_workspace(path):
+def register_workspace(path, session=None):
     """向已在运行的 Harness 实例注册工作区（POST /api/workspace.create，幂等）。
 
+    0.1.3-alpha.1 起 /api 需要浏览器会话 cookie：传入已认证的 session（从
+    启动日志的认证 URL 交换得到）才能通过；无 cookie 时后端返回 401。
     返回 True 表示注册成功；任何失败仅告警，不阻断打开浏览器。
     """
     envelope = {
@@ -146,13 +229,17 @@ def register_workspace(path):
         "method": "workspace.create",
         "payload": {"path": path},
     }
+    client = session if session is not None else requests
     try:
-        resp = requests.post(
+        resp = client.post(
             "http://127.0.0.1:%d/api/workspace.create" % PORT,
             json=envelope,
             timeout=POLL_TIMEOUT,
             proxies={"http": None, "https": None},
         )
+        if resp.status_code == 401:
+            warn("工作区注册需要浏览器认证（先用 DSH 控制台打印的 URL 打开一次页面）")
+            return False
         data = resp.json()
         result = data.get("result")
         if result is not None and result.get("ok") is True:
@@ -173,11 +260,21 @@ def open_url(url):
 
 
 def spawn_server(repo, workspace, patch_path, tailnet):
-    """弹独立最小化 pwsh 窗口启动 dsh web；不接管 stdout/stderr，不监控生命周期。"""
+    """弹独立最小化 pwsh 窗口启动 dsh web；stdout/stderr 全流重定向到 WEB_URL_LOG。
+
+    0.1.3-alpha.1 起 dsh web 把「认证 URL 行」（dsh web: http://…/?token=…）打印到
+    stdout 作为就绪信号；重定向后 vdsh 才能捕获它完成浏览器认证与就绪判定，
+    DSH 控制台输出也落在该日志（排障时查看）。
+    """
     pwsh = shutil.which("pwsh")
     if pwsh is None:
         die("未找到 pwsh（PowerShell 7），请安装并加入 PATH", EXIT_NO_PWSH)
     cli = os.path.join(repo, CLI_REL)
+    try:
+        if WEB_URL_LOG.exists():
+            WEB_URL_LOG.unlink()
+    except OSError:
+        pass  # 清不掉也继续：pwsh 重定向会覆盖
     # CREATE_NEW_CONSOLE 弹独立窗口；SW_SHOWMINNOACTIVE 最小化且不抢占焦点。
     # node 路径加引号包裹，兼容含空格的仓库路径。
     # --patch 是 launcher 层选项，必须位于任何 app 参数之前
@@ -191,6 +288,8 @@ def spawn_server(repo, workspace, patch_path, tailnet):
     if tailnet is not None:
         command += ' --trusted-host "%s"' % tailnet
     command += ' --no-open'
+    # PowerShell 全流重定向到日志（捕获认证 URL 行；窗口内不再回显）。
+    command += ' *> "%s"' % WEB_URL_LOG
     startup = subprocess.STARTUPINFO()
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 7  # SW_SHOWMINNOACTIVE
@@ -247,22 +346,36 @@ def ensure_seed_patch():
 
 
 # ── 主流程 ────────────────────────────────────────────────────────────────
-def _open_existing(workspace_path, tailnet, want_browser):
-    register_workspace(workspace_path)
+def _open_existing(workspace_path, tailnet, want_browser, ready=None):
+    session = (ready or {}).get("session")
+    if session is not None:
+        register_workspace(workspace_path, session=session)
+    else:
+        register_workspace(workspace_path)  # 尽力而为（新 DSH 无 cookie 会 401 并提示）
+    authed_url = (ready or {}).get("authed_url")
     if want_browser:
-        open_url(URL)
+        open_url(authed_url or URL)
     say("vdsh · 已在运行 → %s" % URL)
     if tailnet is not None:
         warn("运行中的实例未带 --trusted-host，手机访问会 403；"
              "请关闭后重启（vdsh --tailnet %s）" % tailnet)
 
 
-def _open_launched(tailnet, want_browser):
+def _open_launched(tailnet, want_browser, ready):
+    authed_url = ready.get("authed_url")
     if want_browser:
-        open_url(URL)
+        open_url(authed_url or URL)  # 打开带 token 的认证 URL（浏览器首访换 cookie）
     say("vdsh · 就绪 → %s" % URL)
     if tailnet is not None:
-        say("vdsh · 手机访问 → https://%s/" % tailnet)
+        token = _token_of(authed_url)
+        if token:
+            say("vdsh · 手机访问 → https://%s/?token=%s" % (tailnet, token))
+        else:
+            say("vdsh · 手机访问 → https://%s/" % tailnet)
+    else:
+        lan_url = ready.get("lan_url")
+        if lan_url:
+            say("vdsh · 手机访问 → %s" % lan_url)
 
 
 def run(argv, settings):
@@ -282,12 +395,24 @@ def run(argv, settings):
     auto_pull = payload["auto_pull"] or launcher_cfg["auto_pull"]
 
     status = probe_harness()
-    if status == "ready":
+    if status in ("ready", "auth"):
         # 已在运行：把当前工作目录注册进该实例（幂等，失败已内部告警），然后打开浏览器。
         # 数据同步只在全新启动前做，实例运行中数据正被写入，跳过。
         if auto_pull:
             step("实例已在运行，跳过自动同步（需要时用 vdsh sync pull）")
-        _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"])
+        # 新 DSH（auth）且是启动器启动的实例：启动日志里仍是当前进程的认证 URL，
+        # 可完成 cookie 交换后开浏览器并注册工作区；否则退回无认证路径。
+        ready = None
+        if status == "auth":
+            auth_url = _url_line_from_log(WEB_URL_LOG)
+            session = _auth_session_bootstrap(auth_url) if auth_url else None
+            if session is not None:
+                ready = {"authed_url": auth_url, "session": session,
+                         "lan_url": _lan_url_from_log(WEB_URL_LOG)}
+            else:
+                warn("运行中的实例启用了浏览器认证；若页面提示认证，"
+                     "请从 DSH 控制台窗口（或 %s）打印的 URL 重新打开" % WEB_URL_LOG)
+        _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"], ready)
         return 0
     if status == "starting":
         # 端口已占用但页面未就绪：可能是上次启动尚未完成（插件多时启动慢），
@@ -298,7 +423,8 @@ def run(argv, settings):
             deadline=launcher_cfg["starting_budget_seconds"],
             gap=STARTING_WAIT_GAP,
             spinner_message="检测到实例启动中，请稍候…",
-            on_ready=lambda: _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"]),
+            log_path=WEB_URL_LOG,
+            on_ready=lambda r: _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"], r),
         )
         if found:
             return 0
@@ -317,12 +443,13 @@ def run(argv, settings):
     patch_path = ensure_seed_patch() if launcher_cfg["workspace_seed"] else None
     spawn_server(repo, workspace_path, patch_path, tailnet)
     step("启动中 · %s" % workspace_path)
-    found = wait_until_ready(
+    ready = wait_until_ready(
         deadline=launcher_cfg["startup_timeout_seconds"],
         gap=launcher_cfg["poll_gap_seconds"],
         spinner_message="服务启动中，请稍候…",
-        on_ready=lambda: _open_launched(tailnet, launcher_cfg["open_browser"]),
+        log_path=WEB_URL_LOG,
+        on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r),
     )
-    if not found:
-        warn("等待超时，服务可能启动失败；请手动打开 %s" % URL)
+    if ready is None:
+        warn("等待超时，服务可能启动失败；请手动打开 %s（DSH 日志: %s）" % (URL, WEB_URL_LOG))
     return 0

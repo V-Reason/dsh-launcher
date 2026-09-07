@@ -4,6 +4,7 @@
 任何 ✗ 项 → 退出码 1；仅 ⚠ 提示 → 退出码 0。
 """
 
+import json
 import os
 import shutil
 
@@ -25,6 +26,24 @@ def _check(label, ok, hint=""):
 
 def _check_tool(label, name):
     return _check(label, shutil.which(name) is not None, "未在 PATH 找到 %s" % name)
+
+
+def _removed_export_hit(lib_index):
+    """插件发布产物是否仍导入已移除的 settingsNamespace（DSH 0.1.3-alpha.1，迁移指南 §1）。"""
+    try:
+        with open(lib_index, "r", encoding="utf-8", errors="replace") as handle:
+            text = handle.read()
+    except OSError:
+        return False
+    return "settingsNamespace" in text and "@deepseek-ai/dsh-settings" in text
+
+
+def _installed_version(installed_dir):
+    try:
+        with open(os.path.join(installed_dir, "package.json"), "r", encoding="utf-8") as handle:
+            return json.load(handle).get("version", "?")
+    except (OSError, ValueError):
+        return "?"
 
 
 def run(argv, settings):
@@ -65,11 +84,12 @@ def run(argv, settings):
     except Exception as error:  # 网络/requests 异常不可靠时仅提示
         status = "unknown"
         print("  ⚠ 端口探测失败：%s" % error)
-    mark = {"ready": "✓", "starting": "⚠", "idle": "—", "unknown": "⚠"}.get(status, "?")
+    mark = {"ready": "✓", "starting": "⚠", "idle": "—", "unknown": "⚠", "auth": "✓"}.get(status, "?")
     print("  %s 端口 %d（%s）%s" % (mark, PORT, status, {
         "idle": "未运行（自检仅作参考）",
         "starting": "启动中，稍候可用",
         "ready": "服务运行中 → %s" % URL,
+        "auth": "服务运行中（浏览器认证）→ 用 DSH 打印的 URL 打开",
         "unknown": "探测异常",
     }.get(status, "")))
     print("数据同步:")
@@ -77,6 +97,34 @@ def run(argv, settings):
         os.path.expanduser("~"), ".dsh")
     failed |= not _check("数据目录: %s" % data_dir, os.path.isdir(data_dir),
                          "目录不存在（首次运行 DSH 或 vdsh sync init 时创建）")
+
+    print("profile 插件:")
+    profile_dir = os.path.join(data_dir, "profiles", "web")
+    pkg_path = os.path.join(profile_dir, "package.json")
+    if os.path.isfile(pkg_path):
+        try:
+            with open(pkg_path, "r", encoding="utf-8") as handle:
+                manifest = json.load(handle)
+            deps = sorted((manifest.get("dependencies") or {}).keys())
+        except (OSError, ValueError) as error:
+            deps = []
+            print("  ⚠ 无法读取 %s（%s）" % (pkg_path, error))
+        if not deps:
+            _check("插件依赖", True, "无组件依赖（纯平台默认）")
+        for name in deps:
+            installed = os.path.join(profile_dir, "node_modules", name)
+            if not os.path.isdir(installed):
+                failed |= not _check("插件 %s 已安装" % name, False,
+                                     "缺失：cd ~/.dsh/profiles/web; pnpm install")
+                continue
+            if _removed_export_hit(os.path.join(installed, "lib", "index.js")):
+                failed |= not _check(
+                    "插件 %s 已适配 DSH 平台" % name, False,
+                    "仍导入已移除的 settingsNamespace：按 dsh-plugin-migration-guide 适配后重装")
+            else:
+                _check("插件 %s 已安装（%s）" % (name, _installed_version(installed)), True)
+    else:
+        print("  — profile 未初始化（首次运行 DSH 或 vdsh sync init 后生成）")
 
     print()
     if failed:

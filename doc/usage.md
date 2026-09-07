@@ -54,7 +54,7 @@ vdsh help / -h / --help          用法
 | `animation.fps` | 8 | TTY 动画帧率（1-60） |
 | `animation.frames` | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | 动画帧序列 |
 | `sync.data_dir` | （空） | DSH 数据目录；支持 `~` 展开（如 `~/.dsh`）；空 = `DSH_HOME` → `~/.dsh` |
-| `sync.remote` | （空） | 默认远端；`vdsh sync init` 无参时使用；`remote set` 写入此处 |
+| `sync.remote` | （空） | 默认远端；`vdsh sync init <URL>`（成功时）与 `remote set` 都会写入此处，无参 `vdsh sync init` 时使用 |
 | `sync.allowlist` | 9 项列表 | 同步范围（相对数据目录）；含用户预设 `.agent-presets/` 与全局配置层 `cordis.patch.yml`，不存在自动跳过 |
 | `sync.gitignore_extra` | （空） | 追加进自动生成的 `.gitignore`；已有文件按缺失行幂等补写 |
 | `sync.commit_name` | `DSH Sync` | 提交者身份（两端必须一致） |
@@ -82,7 +82,7 @@ vdsh help / -h / --help          用法
 vdsh sync status                 # 状态：领先/落后、待推送文件、最近提交
 vdsh sync push                   # 收工前：暂存变更 → 提交 → 推送
 vdsh sync pull                   # 开工前：快进优先，分叉时合并；冲突给出指引
-vdsh sync init <URL>             # 一次性初始化（URL 缺省取 sync.remote）
+vdsh sync init <URL>             # 一次性初始化（URL 缺省取 sync.remote；成功后把地址写入 vdsh.yaml）
 vdsh sync remote [set <URL>]     # 查看/设置远端（更新 git origin 并写入 vdsh.yaml）
 vdsh sync                        # 交互菜单（[1-5] 状态/推送/拉取/初始化/远端）
 vdsh --sync                      # 启动服务前自动 pull（仅实例未运行时；失败只告警）

@@ -23,6 +23,12 @@
 （白板机自行安装同版本）、`profiles/web/node_modules/`（白板机 `pnpm install`，版本由
 `pnpm-lock.yaml` 锁定）、模型缓存与匿名 ID（自动生成）。
 
+> **DSH 版本 ↔ 插件版本必须配对**：插件清单（`package.json`/`pnpm-lock.yaml`）随仓库同步，
+> 插件包体两端各自 `pnpm install`。若主力机升级过 DSH（如 2026-08-30 起 0.1.3-alpha.1
+> 移除了 `settingsNamespace` 导出），先在**主力机**按插件迁移指南适配插件并重新 `push`；
+> 白板机 `pull` + `pnpm install` 后得到的即适配版本。白板机安装的 DSH 必须与主力机同版本，
+> 否则插件 API 与平台不匹配照样启动失败（报错见 §8）。
+
 ---
 
 ## 2. 前提清单
@@ -30,6 +36,7 @@
 主力机：
 
 - [ ] DSH 已配置好并正常使用（插件、聊天记录都在 `$DSH_HOME`，默认 `C:\Users\<用户>\.dsh`）。
+- [ ] 插件已适配当前 DSH 版本（DSH 更新换代后需迁移，见第 1 节配对说明；`vdsh doctor` 可体检）。
 - [ ] 已安装本启动器，`vdsh sync status` 可运行。
 - [ ] 已建好裸仓库（如 `T:\DataBase\dsh-sync-repo.git`）并完成过一次 `vdsh sync push`。
 - [ ] 若你的仓库在旧版本下已跟踪 `profiles/web/node_modules/`，先做一次迁移（见 §5）。
@@ -37,7 +44,7 @@
 白板机：
 
 - [ ] Windows + Git 已安装。
-- [ ] DSH **同版本**安装（bundle 来自 DSH 安装本体；版本不同会导致配置无法按预期加载）。
+- [ ] DSH **同版本**安装（bundle 来自 DSH 安装本体；版本不同会导致插件 API 不匹配，配置无法按预期加载）。
 - [ ] 本启动器已就位（拷贝 `dsh-launcher` 目录即可，`vdsh sync` 功能随目录走）。
 - [ ] 能访问主力机的裸仓库（网络驱动器 / UNC / 内网穿透，映射成盘符如 `Z:`）。
 
@@ -98,7 +105,8 @@ pnpm install
 ```
 
 > `profiles/web/node_modules/` 不入库（体积大、跨机符号链接易坏）；版本由随同步过来的
-> `pnpm-lock.yaml` 锁定，装出来的依赖与主力机完全一致。
+> `pnpm-lock.yaml` 锁定，装出来的依赖与主力机完全一致——包括主力机为适配 DSH 更新
+> 后调整的插件版本（清单随同步走，包体只需 install 一次）。
 
 ### 4.5 首次启动 DSH
 
@@ -175,6 +183,8 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 | init 提示「本地已有 DSH 数据」 | 接入前启动过 DSH | 按 §4.3 的 merge/reset 收尾；或删掉 `$DSH_HOME` 下数据后重新 init |
 | 看不到主力机的用户预设 | 两端 `sync.allowlist` 不一致（缺 `.agent-presets`） | 两端同步同一份 vdsh.yaml 配置后，主力机 `push`，白板机 `pull` |
 | 启动报依赖/插件缺失 | 白板机没执行 §4.4 的 `pnpm install`，或 DSH 版本不同 | 执行 `pnpm install`；确认两端 DSH 同版本 |
+| 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（2026-08-30 平台 API 重构）| 在**主力机**按插件迁移指南适配并重新 push；白板机 pull + `pnpm install`（见 §2/§4.4） |
+| `vdsh config` 的 remote 为空但同步正常 | 旧版 `vdsh sync init` 不持久化远端 | 无参重跑 `vdsh sync init` 自动回填（新版本 init 与 `remote set` 都会写入） |
 | 提示密钥缺失 | `.credentials.yaml` 永不入库 | 按 §4.6 在本地配置一次 |
 | node_modules 相关文件出现在待推送 | 旧仓库未迁移 | 按 §5 迁移 |
 

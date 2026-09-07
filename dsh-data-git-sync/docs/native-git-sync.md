@@ -104,6 +104,14 @@ profiles/web/node_modules/
 重启也会消失，因此不存在可同步的文件；要让副机获得同样能力，把它的组合写进用户预设
 （`.agent-presets/`，见 §2.1）即可被同步。
 
+**插件版本 ↔ DSH 版本配对**：插件 API 随 DSH 演进（如 2026-08-30 起的 0.1.3-alpha.1
+移除 `@deepseek-ai/dsh-settings` 的 `settingsNamespace` 导出，旧插件启动即 fail-loud：
+`does not provide an export named 'settingsNamespace'`）。适配动作只在**写入机**（主力机）
+做：按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 迁移/升级插件 → 重新
+`dsh plugin --profile web update <pkg>`（或改 `package.json` 版本）→ `vdsh sync push`；
+副机 `pull` 后 `pnpm install` 即得适配版本。两端 DSH 版本不一致 = 配对破坏，配置无法按
+预期加载；`vdsh doctor` 会体检已安装插件是否仍引用已移除导出。
+
 ---
 
 ## 3. 一次性初始化
@@ -159,7 +167,8 @@ powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/d
 
 **白板机检清单（顺序重要）**：
 
-1. 安装与主力机**同版本**的 DSH（安装本体不被同步，bundle 来自安装）。
+1. 安装与主力机**同版本**的 DSH（安装本体不被同步，bundle 来自安装；插件 API 与 DSH
+   版本配对，见 §2.3，版本不一致会启动失败）。
 2. **先不要启动 DSH**——启动会写 `sessions/`，导致下一次 init 判定为「已有数据」而走 merge 分支。
 3. `vdsh sync init <URL>`（或上方的原生命令）→ 远端数据落盘。
 4. `cd ~/.dsh/profiles/web; pnpm install`——`profiles/web/node_modules/` 不入库，版本由已同步的
@@ -328,6 +337,8 @@ git -C ~/.dsh commit
 | 换行反复翻动（大量 `\r`/`\n` diff） | 两端 `core.autocrlf` 不一致；统一后 `git add --renormalize .` 一次 |
 | 副机 node_modules 缺失/异常 | 属于正常设计（不入库）：在 `profiles/web` 下执行 `pnpm install` |
 | 副机看不到主力机的用户预设 | `.agent-presets/` 未被同步（旧的 allowlist）；两端 `sync.allowlist` 保持一致后重新 `push`/`pull` |
+| `remote` 提示 git origin 与 vdsh.yaml 不一致 | 旧版 `init` 不持久化远端；重跑 `sync-dsh.ps1 init`（无参=取 git origin 自动回填）即一致 |
+| 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（平台 API 重构，见 §2.3） | 在主力机按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 适配插件、重新 push；副机 pull + `pnpm install` |
 | 脚本中文乱码/解析失败 | 确保以 `powershell -File`（或 `pwsh`）运行；文件为 UTF-8 BOM 编码 |
 
 ---
