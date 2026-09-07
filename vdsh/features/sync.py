@@ -72,6 +72,18 @@ def _child_env(settings):
     return env
 
 
+def _has_utf8_bom(path):
+    """脚本是否带 UTF-8 BOM（sync-dsh.ps1 面向 PS 5.1，无 BOM 会按 ANSI 解码全线解析失败）。
+
+    读失败视为通过（让脚本自己报错），不掩盖更底层的文件问题。
+    """
+    try:
+        with open(path, "rb") as fh:
+            return fh.read(3) == b"\xef\xbb\xbf"
+    except OSError:
+        return True
+
+
 def run_sync(sync_args, settings):
     """在当前控制台运行同步脚本，返回其退出码。
 
@@ -81,6 +93,11 @@ def run_sync(sync_args, settings):
     if not SYNC_PS1.is_file():
         print("vdsh ⚠ 同步脚本缺失: %s" % SYNC_PS1, file=sys.stderr)
         return SYNC_NOT_SETUP
+    if not _has_utf8_bom(SYNC_PS1):
+        print("vdsh ✗ 同步脚本编码异常：%s 缺少 UTF-8 BOM（Windows PowerShell 5.1 需要，"
+              "否则中文乱码、全线解析失败）。请以 UTF-8 with BOM 重新保存该文件。" % SYNC_PS1,
+              file=sys.stderr)
+        return 1
 
     sub = sync_args[0].lower() if sync_args else ""
     if sub == "init":

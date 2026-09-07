@@ -1,4 +1,4 @@
-#Requires -Version 5.1
+﻿#Requires -Version 5.1
 <#
 .SYNOPSIS
   DSH 数据同步（原生 Git 方案）：在 DSH 进程之外，用原生 git 命令同步 $DSH_HOME 数据。

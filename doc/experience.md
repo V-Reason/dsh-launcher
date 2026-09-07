@@ -54,6 +54,12 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 
 `Spinner` 以 `sys.stdout.isatty()` 判定；`say()` 非 TTY 直接 `print(line)`。因此**重定向输出绝不含 `\r`/控制字符**（有回归测试断言）。
 
+### 2.3 sync-dsh.ps1 必须 UTF-8 带 BOM（2026-09 真实踩坑）
+
+**现象**：`vdsh sync …` 报满屏 `UnexpectedToken`（PS 5.1「字符串缺少终止符/缺少"}"」），脚本 37/104/117/118/129 行全线报错。
+**原因**：`sync_host()` 走 Windows PowerShell 5.1；`.ps1` 无 BOM 时按 ANSI（GBK）解码，中文注释/字符串全部乱码，括号引号错位 → 解析器在字符串中途崩掉（如动画帧串 `⠋⠙⠹…` 丢失收尾引号）。
+**解决**：脚本保持 **UTF-8 with BOM**；本次即因用 UTF-8 无 BOM 的编辑器改写脚本丢掉了 BOM（`git diff` 只见首行多出 `﻿` BOM 字符）。launcher 侧 `vdsh/features/sync.py` 已在执行前检查 BOM，缺失时给出明确报错而非解析墙。
+
 ## 3. YAML 配置
 
 ### 3.1 双引号标量内反斜杠
