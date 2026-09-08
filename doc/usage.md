@@ -96,6 +96,7 @@ vdsh --sync                      # 启动服务前自动 pull（仅实例未运�
 - 设计背景（为什么插件做不到）、同步范围、冲突处理见 `dsh-data-git-sync/docs/native-git-sync.md`；小白教程见 `dsh-data-git-sync/docs/beginner-guide.md`。
 - 输出风格：步骤 `→ 动作`、成功汇总 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；数据目录按 `~/.dsh` 短形式显示一次，不再输出完整路径清单。`status` 的「待推送」按行列出（最多 10 条，其余给截断提示）；`push` 反映推送内容（提交/文件数），`pull` 同样反映拉取内容（远端新增 N 提交 · M 文件），无更新时直接提示「已是最新」并跳过合并。fetch/push 以 `--progress` 执行并经 vdsh 逐行流式显示实时进度。
 - 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 与 `profiles/*/.dsh-module-fallback/` 不入库（后者是内置必备规则，Windows git 会把 junction 展开入库导致副机启动报错，详见 `experience.md` §8.5），副机需 `pnpm install`、模块回退缓存由 dsh 自动重建。API 密钥（`.credentials.yaml`）永不入库。
+- ⚠️ **聊天记录（`sessions/`）跨机可见性已搁置（2026-09 第三波）**：文件会随仓库同步，但 DSH 按本机工作区绝对路径组织会话（`sessions/<projectKey(cwd)>/`），跨机路径不同即对不上，副机 UI 不显示主力机聊天记录。这是 DSH 数据模型限制，非同步脚本可修；恢复条件见 `design.md` §5。不影响设置/插件/预设/附件/记忆的同步。
 - 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`；`DSH_HOME` 与 `sync.data_dir` 均支持 `~` 写法，使用时自动展开为主目录绝对路径。
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
 - 规则：**两台电脑不要同时干活**：A 收工 `push` → B 开工 `pull`；DSH 空闲时再同步。

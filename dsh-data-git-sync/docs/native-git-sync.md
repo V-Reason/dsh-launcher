@@ -43,7 +43,7 @@
 | 路径 | 内容 |
 |---|---|
 | `.gitignore` | 排除规则本身（随仓库同步，两端一致） |
-| `sessions/` | 全部对话记录（JSONL + zstd 帧） |
+| `sessions/` | 聊天记录（JSONL + zstd 帧）——**文件随仓库同步；跨机 UI 可见性已搁置**：DSH 按本机工作区绝对路径 `projectKey(cwd)` 组织会话目录，副机路径不同即对不上，详见 §8 与 `doc/experience.md` §8.6 |
 | `profiles/web/` | Web Profile 完整配置（`package.json`、`pnpm-lock.yaml`、`pnpm-workspace.yaml`、`cordis.patch.yml`；`node_modules/` 除外，见 §7） |
 | `storages/` | 插件持久化数据 |
 | `attachments/` | 对话内图片/附件的字节 |
@@ -364,6 +364,7 @@ git -C ~/.dsh commit
 | 副机 node_modules 缺失/异常 | 属于正常设计（不入库）：在 `profiles/web` 下执行 `pnpm install` |
 | 副机 dsh 启动报 `exists and is not a symlink or dsh-managed module proxy` | 老仓库误跟踪了 `.dsh-module-fallback/`（Windows git 把 junction 展开成真实文件入库，副机检出后失去链接属性）。**修复**：主力机 `vdsh sync push`（新版本自动检测并 `git rm -r --cached`）；副机 `vdsh sync pull` 后删除该缓存目录（`Remove-Item -Recurse -Force $HOME\.dsh\profiles\web\.dsh-module-fallback`）再启动；新版本 `vdsh` 启动前也会自动清理此类污染 |
 | 副机看不到主力机的用户预设 | `.agent-presets/` 未被同步（旧的 allowlist）；两端 `sync.allowlist` 保持一致后重新 `push`/`pull` |
+| 聊天记录**文件在**但副机 UI 不显示 | **DSH 数据模型限制，已搁置（2026-09 第三波）**：DSH 按本机工作区绝对路径组织会话（`sessions/<projectKey(cwd)>/` + `workspace.json` 的 `tables.workspaces[].path`），跨机路径不同即对不上，副机查询按副机 cwd 算键。恢复条件见 `doc/design.md` §5 / `doc/experience.md` §8.6；非本脚本可修 |
 | `remote` 提示 git origin 与 vdsh.yaml 不一致 | 旧版 `init` 不持久化远端；重跑 `sync-dsh.ps1 init`（无参=取 git origin 自动回填）即一致 |
 | 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（平台 API 重构，见 §2.3） | 在主力机按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 适配插件、重新 push；副机 pull + `pnpm install` |
 | 脚本中文乱码/解析失败 | 确保以 `powershell -File`（或 `pwsh`）运行；文件为 UTF-8 BOM 编码 |

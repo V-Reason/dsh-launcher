@@ -50,7 +50,7 @@ vdsh doctor                       # 环境自检
 |---|---|
 | `vdsh`（默认） | 启动 dsh web：最小化窗口、就绪检测、工作区注册、打开浏览器 |
 | `vdsh build` | 直接执行仓库构建（问题自动检测亦可），带动画 |
-| `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时；`init` 无参时交互配置仓库/数据目录/远端 |
+| `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时；`init` 无参时交互配置仓库/数据目录/远端。⚠️ 聊天记录文件会同步，但**跨机 UI 可见性已搁置**（DSH 按本机路径组织会话）——见 [doc/demo.md](doc/demo.md) §1 已知限制 |
 | `vdsh update dsh / plugin` | 更新 Harness 本体 / profile 插件依赖（分开执行） |
 | `vdsh config` / `setup` / `doctor` | 配置查看 / 重跑向导 / 环境自检 |
 

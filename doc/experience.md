@@ -200,3 +200,26 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 - **junction ≠ 普通目录**：`os.path.islink()` 对 junction 返回 False（Python 3.8-3.12）；用 `os.lstat().st_reparse_tag` / `st_file_attributes & 0x400`（reparse point）或 `os.path.isjunction`（3.12+）判断；测试脚本同样踩过。
 - **git 会把 reparse point 当目录递归提交**（非 TTY 也如此），所以「同步排除规则」必须在 allowlist 之外与 `.gitignore` **双保险**；已经入库的只能 `git rm -r --cached` 一次性移出（`--cached` 只改索引、不动工作区，主机 junction 安全）。
 - **修复顺序**：先让 dsh 重建（启动自愈）再把仓库层面的删除提交同步过去；若副机先 `pull` 拿到删除记录，工作区的真实目录会被 git 正常移除（本次提交即如此）。
+
+### 8.6 DSH 会话按「工作区绝对路径」组织：跨机同步「文件在、UI 不显示」（2026-09，已搁置）
+
+**现象**：副机 `vdsh sync pull` 后 `sessions/` 数据文件齐备，但副机 DSH 界面没有主力机的聊天记录。
+
+**根因（源码 + 磁盘证据）**：
+- `sessions/` 目录键 = `projectKey(cwd)`：`packages/session/session-persistence-jsonl/src/format.ts`
+  把工作区**绝对路径**（含盘符）折算成 `--slug--`（分隔符/盘符 → `-`，非安全字符 → `~XXXX`）。
+  实测 `T:\Open-Source\dsh-launcher` → `sessions/--T-Open-Source-dsh-launcher--/`；
+  中文路径 → `--T-~6742~4E03~6742~516B-…--`。
+- `storages/workspace.json` 的 `tables.workspaces[].path` 也是**绝对路径**（`T:\…`、`C:\…`），
+  workspace 的 sessionIds 归属绑定在这些路径键上。
+- 副机 cwd 是另一台机器的路径（`C:\_TMP`…）→ `projectKey(cwd)` 与同步来的键集合**不重合**；
+  副机按自己的键查询，主力机键区间不参与 → UI 空。Git 只能按路径名搬文件，**改不了键**。
+
+**结论**：这不是同步脚本/launcher 的缺陷，是 DSH 数据模型「会话数据只属于本机工作区绝对路径」
+与「跨机镜像」语义冲突；launcher 侧强修（键重命名/重映射/扁平化）成本 > 收益 → 功能已搁置
+（2026-09 第三波收尾，见 `devlog.md` 第三波、`design.md` §5）。
+
+**沉淀为排查顺序**：出现「文件在、UI 不显示」→ 先检查**路径相关键**（目录名是否 = `projectKey(cwd)`、
+注册表 `path` 是否绝对路径、两端路径是否一致），再怀疑数据损坏。将来恢复该功能的候选路径：
+DSH 按 workspace id（而非绝对路径）检索会话；副机把主力机路径重映射成相同绝对路径
+（`subst`/junction 挂同盘符）；launcher 按 session id 聚合（不推荐，长期维护成本高）。

@@ -29,6 +29,20 @@
 > 白板机 `pull` + `pnpm install` 后得到的即适配版本。白板机安装的 DSH 必须与主力机同版本，
 > 否则插件 API 与平台不匹配照样启动失败（报错见 §8）。
 
+> ⚠️ **已知限制（2026-09 第三波，已搁置）：聊天记录跨机同步不成立**
+>
+> `sessions/` 的文件确实会随仓库同步，但**白板机的 DSH 界面看不到主力机的聊天记录**。
+> 根因：DSH 按**本机工作区绝对路径**组织会话——`sessions/` 下的目录键是
+> `projectKey(cwd)`（如 `--T-Open-Source-dsh-launcher--` ↔ `T:\Open-Source\dsh-launcher`），
+> `storages/workspace.json` 的 `tables.workspaces[].path` 同样记录绝对路径。白板机的
+> cwd 是另一台机器的路径（如 `C:\_TMP`），会话查询按白板机路径计算键 → 对不上
+> 主力机路径键下的数据，因此表现为「同步了但看不到」。
+>
+> 本方案（静态 Git 同步）只负责搬文件，**无法改变 DSH 的路径键模型**；launcher 侧
+> 做路径重映射/扁平化属于给 DSH 未提供的语义打补丁，维护成本高，**该功能已搁置**。
+> 恢复条件与候选路径见 `design.md` §5「聊天记录跨机同步（已搁置）」；本次收尾记录见
+> `devlog.md`（2026-09-08 第三波）。其余同步内容（设置、插件、预设、附件、记忆）不受影响。
+
 ---
 
 ## 2. 前提清单
@@ -164,7 +178,8 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 
 接入完成后逐项核对（对应 §1「同步涵盖」）：
 
-- [ ] 白板机能看到主力机的聊天记录（`sessions/`）。
+- [ ] 白板机能看到主力机的聊天记录（`sessions/`）——**✗ 已知不可用**：DSH 按本机工作区绝对
+      路径组织会话，跨机路径不同即对不上；该功能已搁置（见 §1 已知限制）。
 - [ ] 设置一致：默认模型、主题、任务通知等（`settings.yaml`）。
 - [ ] 主力机的用户 agent 预设出现在 roster（`.agent-presets/`，如 `study` 及其 `skills/`）。
 - [ ] 插件配置生效：profile 补丁层 / 全局补丁层（`cordis.patch.yml`）与插件运行数据
@@ -202,6 +217,7 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 | 启动报 `exists and is not a symlink or dsh-managed module proxy` | 旧同步仓库跟踪过 `.dsh-module-fallback`（junction 被 git 展开入库），白板机检出真实目录 | 主力机执行 §5 注释里的手动命令（或直接 `vdsh sync push` 自动修复）并推送；白板机 `vdsh sync pull` 后**删除该缓存目录**（`Remove-Item -Recurse -Force "$HOME\.dsh\profiles\web\.dsh-module-fallback"`）再 `vdsh` 启动；新版本 vdsh 启动前会自动清理这类污染，删目录只是最快路径 |
 | 提示密钥缺失 | `.credentials.yaml` 永不入库 | 按 §4.6 在本地配置一次 |
 | node_modules 相关文件出现在待推送 | 旧仓库未迁移 | 按 §5 迁移 |
+| 白板机**看不到**主力机的聊天记录（`sessions/` 数据其实在） | DSH 按本机工作区绝对路径组织会话；跨机路径不同（盘符/目录不一致）→ 会话目录键与 workspace 注册路径对不上（`--T-…--` ↔ `--C-…--`），副机按副机 cwd 计算键查不到 | **已知且已搁置**（2026-09 第三波）：见 §1 已知限制与 `design.md` §5。只搬文件无法解决——DSH 的路径键模型如此；后续若 DSH 支持按 workspace id 检索会话或做路径重映射再恢复 |
 
 ---
 

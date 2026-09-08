@@ -78,6 +78,10 @@ sync-dsh.ps1 help                  # 用法说明
   `.dsh-data-sync/`、`llm-*/`、`profiles/node_modules/`、`profiles/web/node_modules/`、
   `profiles/*/.dsh-module-fallback/`（**内置必备规则**：dsh 模块回退缓存，Windows git 会把
   junction 展开入库导致副机启动报错；历史误跟踪由 push 自动 `git rm -r --cached` 修复）。
+- ⚠️ **聊天记录跨机可见性已搁置（2026-09 第三波）**：`sessions/` 文件照常随仓库同步，但 DSH
+  按本机工作区绝对路径组织会话（`sessions/<projectKey(cwd)>/`），跨机路径不同即对不上，副机
+  UI 不显示主力机聊天记录。属 DSH 数据模型限制，非本脚本可修；恢复条件见 `doc/design.md` §5
+  与 `doc/experience.md` §8.6。不影响设置/插件/预设/附件/记忆的同步。
 - **退出码**（供 `vdsh --sync` 等调用方区分）：`0` 成功；`1` 硬失败；`2` 用法错误；
   `3` 被阻塞（脏工作区 / 冲突 / 远端 main 未建立）；`4` 未初始化（可跳过）。
 

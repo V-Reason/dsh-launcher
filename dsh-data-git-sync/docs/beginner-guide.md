@@ -152,7 +152,14 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 1. 在 PowerShell 执行 `cd "$HOME\.dsh\profiles\web"` 再执行 `pnpm install` —— 插件的"依赖包"
    不通过同步搬运（太大、跨机器易坏），版本由随同步过来的 `pnpm-lock.yaml` 锁定，装出来和 A 完全一致。
 2. 打开 DSH，在设置里填好 API 密钥（`.credentials.yaml` 永不入库，B 需要自己配一次）。
-   然后启动 DSH 检查：聊天历史、设置、插件/预设都在（比如你 A 上配置的 agent 预设也能看到），就成功了。
+   然后启动 DSH 检查：设置、插件/预设（比如你 A 上配置的 agent 预设也能看到）都在，就成功了。
+
+> ⚠️ **聊天记录为什么看不到？**（已搁置，2026-09）B 的 DSH 界面**不显示** A 的历史聊天：
+> DSH 按「本机工作区绝对路径」组织会话数据（`sessions/--T-…--` 这类目录键 + `workspace.json`
+> 里的绝对路径），A、B 两台机器路径不同就对应不上——文件其实同步过来了，只是界面按 B 的
+> 路径去找、找不到 A 路径键下那份。这是 DSH 数据模型的限制，不是本工具的 bug；要恢复需要
+> DSH 支持按会话 id（而非路径）检索，或把两台机器的路径做成一模一样（详见
+> `doc/design.md` §5、`doc/experience.md` §8.6）。其余内容（设置/插件/预设/附件/记忆）不受影响。
 
 ---
 
@@ -179,7 +186,10 @@ powershell -ExecutionPolicy Bypass -File C:\tools\dsh-launcher\dsh-data-git-sync
 
 **演练一次**（强烈建议，验证真的通了）：
 1. A 上发一条聊天消息 → A 收工 `push`；
-2. B 上开工 `pull` → B 打开 DSH，能看到那条消息 → 成功！
+2. B 上开工 `pull` → 检查**文件已到位**（`dir "$HOME\.dsh\sessions"` 能看到新增的
+   `--…--` 目录）即说明同步通了。
+   > ⚠️ B 的 DSH 界面**看不到** A 的消息属正常（已搁置，见 §5.1 的说明框）：DSH 按本机
+   > 路径组织会话，跨机路径不同对不上。用文件存在性验证同步即可。
 
 ---
 
