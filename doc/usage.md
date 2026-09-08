@@ -58,7 +58,7 @@ vdsh help / -h / --help          用法
 | `sync.data_dir` | （空） | DSH 数据目录；支持 `~` 展开（如 `~/.dsh`）；空 = `DSH_HOME` → `~/.dsh` |
 | `sync.remote` | （空） | 默认远端；`vdsh sync init <URL>`（成功时）与 `remote set` 都会写入此处，无参 `vdsh sync init` 时使用 |
 | `sync.allowlist` | 9 项列表 | 同步范围（相对数据目录）；含用户预设 `.agent-presets/` 与全局配置层 `cordis.patch.yml`，不存在自动跳过 |
-| `sync.gitignore_extra` | （空） | 追加进自动生成的 `.gitignore`；已有文件按缺失行幂等补写 |
+| `sync.gitignore_extra` | （空） | 追加进自动生成的 `.gitignore`；已有文件按缺失行幂等补写。另有**内置必备规则**（`profiles/*/.dsh-module-fallback/`）与 `gitignore_extra` 无关、始终存在 |
 | `sync.commit_name` | `DSH Sync` | 提交者身份（两端必须一致） |
 | `sync.commit_email` | `dsh-sync@local` | 同上 |
 | `sync.timeout_seconds` | 0 | 0 = 不限时；>0 时 fetch/push 等超过即终止（按硬失败退出码 1） |
@@ -95,7 +95,7 @@ vdsh --sync                      # 启动服务前自动 pull（仅实例未运�
 - **`vdsh sync init` 无参（交互终端）= 副机接入向导**：依次询问 DSH 安装目录（`launcher.repo`，校验含 `package.json`）、DSH 数据目录（`sync.data_dir`，校验绝对路径/可创建）、远端裸仓库地址（`sync.remote`，`file://` 与本地盘路径归一化并校验存在性与裸仓库形态，`http(s)` 仅语法校验），确认后写入 vdsh.yaml 再执行初始化；每项回车用默认值、`s` 跳过、Ctrl+C 取消。跨机复制 launcher 时残留的另一台机器路径（如 `T:/deepseek-harness`、`file:///T:/DataBase/...`）会在向导中明确提示并默认为本机探测值。
 - 设计背景（为什么插件做不到）、同步范围、冲突处理见 `dsh-data-git-sync/docs/native-git-sync.md`；小白教程见 `dsh-data-git-sync/docs/beginner-guide.md`。
 - 输出风格：步骤 `→ 动作`、成功汇总 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；数据目录按 `~/.dsh` 短形式显示一次，不再输出完整路径清单。`status` 的「待推送」按行列出（最多 10 条，其余给截断提示）；`push` 反映推送内容（提交/文件数），`pull` 同样反映拉取内容（远端新增 N 提交 · M 文件），无更新时直接提示「已是最新」并跳过合并。fetch/push 以 `--progress` 执行并经 vdsh 逐行流式显示实时进度。
-- 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 不入库，副机需 `pnpm install`。API 密钥（`.credentials.yaml`）永不入库。
+- 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 与 `profiles/*/.dsh-module-fallback/` 不入库（后者是内置必备规则，Windows git 会把 junction 展开入库导致副机启动报错，详见 `experience.md` §8.5），副机需 `pnpm install`、模块回退缓存由 dsh 自动重建。API 密钥（`.credentials.yaml`）永不入库。
 - 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`；`DSH_HOME` 与 `sync.data_dir` 均支持 `~` 写法，使用时自动展开为主目录绝对路径。
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
 - 规则：**两台电脑不要同时干活**：A 收工 `push` → B 开工 `pull`；DSH 空闲时再同步。

@@ -151,6 +151,13 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 
 预期：推送后仓库文件数大幅下降；白板机按 §4.4 各自 `pnpm install`。
 
+> **跟踪过 `.dsh-module-fallback/` 的旧仓库（2026-09 后新仓库无需）**：该目录同样必须
+> 一次性移出（Windows git 会把 junction 展开成真实文件入库，白板机检出后 dsh 启动报
+> 「exists and is not a symlink or dsh-managed module proxy」）。新版本 `vdsh sync push`
+> 会自动检测并 `git rm -r --cached`（只动索引）；若想手动处理，命令与上面一致，
+> 只是把路径换成 `profiles/web/.dsh-module-fallback`。处理完成后白板机 `pull` +
+> `vdsh` 启动，dsh 自动重建该缓存目录。
+
 ---
 
 ## 6. 体验一致性验收清单
@@ -192,6 +199,7 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 | 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（2026-08-30 平台 API 重构）| 在**主力机**按插件迁移指南适配并重新 push；白板机 pull + `pnpm install`（见 §2/§4.4） |
 | `vdsh config` 的 remote 为空但同步正常 | 旧版 `vdsh sync init` 不持久化远端 | 无参重跑 `vdsh sync init`（TTY 下向导回车确认默认值；新版本 init 与 `remote set` 都会写入） |
 | `dsh web` 报 `Cannot find module 'T:\…\apps\cli\lib\bin.js'` | 旧版 `dsh.cmd` 硬编码主力机路径；跨机复制后残留 | 升级 launcher：`dsh.cmd` 现在按 DSH_REPO → vdsh.yaml → 本机候选动态解析；仍报错时运行 `vdsh setup` 或设置 `DSH_REPO` |
+| 启动报 `exists and is not a symlink or dsh-managed module proxy` | 旧同步仓库跟踪过 `.dsh-module-fallback`（junction 被 git 展开入库），白板机检出真实目录 | 主力机执行 §5 注释里的手动命令（或直接 `vdsh sync push` 自动修复）并推送；白板机 `vdsh sync pull` 后**删除该缓存目录**（`Remove-Item -Recurse -Force "$HOME\.dsh\profiles\web\.dsh-module-fallback"`）再 `vdsh` 启动；新版本 vdsh 启动前会自动清理这类污染，删目录只是最快路径 |
 | 提示密钥缺失 | `.credentials.yaml` 永不入库 | 按 §4.6 在本地配置一次 |
 | node_modules 相关文件出现在待推送 | 旧仓库未迁移 | 按 §5 迁移 |
 

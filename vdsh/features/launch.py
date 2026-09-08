@@ -40,6 +40,7 @@ from ..config import (
     WEB_URL_LOG,
 )
 from ..console import die, say, step, warn
+from ..module_fallback import heal_module_fallback
 from ..spinner import Spinner
 
 NAME = "launch"
@@ -486,6 +487,16 @@ def run(argv, settings):
     if not os.path.isfile(cli_bin):
         die("未找到 dsh CLI 产物（%s）：请先执行 vdsh build；若仓库路径不对，"
             "运行 vdsh setup 或设置 DSH_REPO 后重试。" % cli_bin, EXIT_BUILD)
+
+    # 模块回退自愈：git 同步在 Windows 上把 junction 展开成真实目录/文件入库，
+    # 副机检出后 dsh 启动会报「exists and is not a symlink or dsh-managed module proxy」。
+    # 这里按 app-boot 规则清理非链接、非 proxy 条目（仅污染数据，dsh 会自动重建）；
+    # 只处理数据目录存在的情形，失败不阻断启动（dsh 的报错会给出明确提示）。
+    data_dir = settings_mod.effective_data_dir(settings) or os.path.expanduser("~/.dsh")
+    healed = heal_module_fallback(data_dir)
+    if healed > 0:
+        warn("已清理 %d 个同步污染回退条目（.dsh-module-fallback 下的真实目录/文件，"
+             "dsh 启动时将自动重建）" % healed)
 
     patch_path = ensure_seed_patch() if launcher_cfg["workspace_seed"] else None
     proc = spawn_server(repo, workspace_path, patch_path, tailnet)

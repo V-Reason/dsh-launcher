@@ -122,6 +122,8 @@ probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn �
 | sync init 向导放 Python 层（2026-09） | vdsh.yaml 的读取/校验/`patch_values` 属 launcher 域；脚本侧只管 init 本体，退出码 0-4 契约不变 |
 | dsh.cmd 动态解析仓库（2026-09） | 硬编码绝对路径在跨机复制时必挂；解析链 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES`，显式 env 永不覆盖 |
 | 启动失败即时反馈（2026-09） | `-NoExit` 使子进程崩溃后句柄仍存活 → 空转到超时；去掉后靠 `proc.poll()` 检测 + 日志尾部，失败不再无反馈 |
+| 模块回退目录按 app-boot 规则自愈（2026-09） | git 把 junction 展开入库 → 副机检出真实目录 → dsh 报「not a symlink or dsh-managed module proxy」。`heal_module_fallback` 严格复制 ensureSymlink 判定（链接/proxy 保留，其余删除），launch 与 dsh_cli 双通道调用；比报错驱动的手工删除可预期 |
+| `.dsh-module-fallback` 列入内置 ignore 规则（2026-09） | 该目录是 dsh 可再生缓存（纯本机链接/proxy），同步必有污染；不作为 `gitignore_extra` 交给用户配置，避免「忘配」复发；`Sync-Push` 自动 `git rm -r --cached` 历史误跟踪（只动索引） |
 
 ## 5. 已知边界
 

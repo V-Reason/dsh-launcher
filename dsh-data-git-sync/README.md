@@ -75,7 +75,9 @@ sync-dsh.ps1 help                  # 用法说明
   `cordis.patch.yml`（全局配置层）；不存在自动跳过。插件与插件配置的同步矩阵见
   `docs/native-git-sync.md` §2.3；白板副机接入（含 `pnpm install`、密钥配置）见 §3.2。
 - 排除（随仓库同步的 `.gitignore`）：`.credentials.yaml`、`*.log`、`logs/`、`*.lock`、
-  `.dsh-data-sync/`、`llm-*/`、`profiles/node_modules/`。
+  `.dsh-data-sync/`、`llm-*/`、`profiles/node_modules/`、`profiles/web/node_modules/`、
+  `profiles/*/.dsh-module-fallback/`（**内置必备规则**：dsh 模块回退缓存，Windows git 会把
+  junction 展开入库导致副机启动报错；历史误跟踪由 push 自动 `git rm -r --cached` 修复）。
 - **退出码**（供 `vdsh --sync` 等调用方区分）：`0` 成功；`1` 硬失败；`2` 用法错误；
   `3` 被阻塞（脏工作区 / 冲突 / 远端 main 未建立）；`4` 未初始化（可跳过）。
 

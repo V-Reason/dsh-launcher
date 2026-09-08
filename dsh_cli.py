@@ -32,8 +32,8 @@ def _valid_repo(path):
     return bool(path) and os.path.isfile(os.path.join(path, "package.json"))
 
 
-def _repo_from_config():
-    """从 vdsh.yaml 读取 launcher.repo（支持 JSON 双引号值与裸值+行尾注释）。"""
+def _config_value(key):
+    """从 vdsh.yaml 读顶层键值（支持 JSON 双引号值与裸值+行尾注释）。"""
     if not os.path.isfile(CONFIG_PATH):
         return None
     try:
@@ -41,7 +41,7 @@ def _repo_from_config():
             text = handle.read()
     except OSError:
         return None
-    match = re.search(r"(?m)^\s+repo:\s*(.+)$", text)
+    match = re.search(r"(?m)^\s+%s:\s*(.+)$" % re.escape(key), text)
     if not match:
         return None
     # 剥行尾注释（模板/手工配置常在值后跟 `# 说明`），再去引号/JSON 反解。
@@ -52,6 +52,22 @@ def _repo_from_config():
         except ValueError:
             return value.strip('"')
     return value or None
+
+
+def _repo_from_config():
+    """从 vdsh.yaml 读取 launcher.repo（支持 JSON 双引号值与裸值+行尾注释）。"""
+    return _config_value("repo")
+
+
+def _data_dir():
+    """DSH 数据目录：DSH_HOME 环境变量 > vdsh.yaml sync.data_dir > ~/.dsh。"""
+    env = os.environ.get("DSH_HOME", "").strip()
+    if env:
+        return os.path.normpath(os.path.expanduser(env))
+    configured = _config_value("data_dir")
+    if configured:
+        return os.path.normpath(os.path.expanduser(configured))
+    return os.path.normpath(os.path.expanduser("~/.dsh"))
 
 
 def _resolve():
@@ -87,6 +103,16 @@ def main():
         print("      若仓库无误请先构建（vdsh build）；若路径不对请 vdsh setup 重新配置。",
               file=sys.stderr)
         return 1
+    # 模块回退自愈：git 同步把 junction 展开成真实目录/文件后，dsh 启动会报
+    # 「exists and is not a symlink or dsh-managed module proxy」；启动前清掉污染条目。
+    try:
+        from vdsh.module_fallback import heal_module_fallback
+        healed = heal_module_fallback(_data_dir())
+        if healed > 0:
+            print("dsh ⚠ 已清理 %d 个模块回退污染条目（.dsh-module-fallback 下的真实目录/文件，"
+                  "dsh 启动时将自动重建）" % healed, file=sys.stderr)
+    except Exception as error:  # 自愈失败不阻断启动（dsh 自身的报错会给出指引）
+        print("dsh ⚠ 模块回退自愈跳过（%s）" % error, file=sys.stderr)
     try:
         return subprocess.call([node, cli] + argv)
     except KeyboardInterrupt:

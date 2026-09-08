@@ -175,3 +175,28 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 - 每项 `s`/`skip`/`q` = 跳过该项（不写配置）；EOF/Ctrl+C = 取消整个向导（返回 0，不执行 init）；校验失败重试 3 次后放弃该项并明确提示。
 - 校验策略是「重试提示」而非「拦截放行」：走不过校验的远端，用户可另带 URL 直跑 `vdsh sync init <URL>` 绕过。
 - 写回走 `patch_values`（保留注释）；持续化的键：`launcher.repo`、`sync.data_dir`、`sync.remote`。
+
+### 8.5 Windows git 会把 junction **展开入库**：`.dsh-module-fallback` 的「非链接」报错（2026-09，副机启动失败根因）
+
+**现象**：副机 `vdsh`（dsh web 启动）报：
+`Error: dsh: C:\Users\…\.dsh\profiles\web\.dsh-module-fallback\node_modules\@codemirror\commands exists and is not a symlink or dsh-managed module proxy; remove it so dsh can manage the installation fallback`。
+
+**根因链（真实数据验证）**：
+1. dsh 的模块回退目录 `profiles/web/.dsh-module-fallback/node_modules` 在主力机上是 **junction**（指向 `profiles/web/node_modules` 的 pnpm 安装，dsh 启动时自动愈合/重建）；
+2. Windows 上 git **不认识 directory junction 的链接语义**：`core.symlinks` 默认关闭时把 junction 当**普通目录递归**，于是 12618 个真实的包文件被 `git add` 入库（`.gitignore` 只写了 `profiles/web/node_modules/`，漏了 `.dsh-module-fallback/`）；
+3. 副机 `checkout` 出来的就是真实目录/文件（无链接属性）→ dsh 启动 `healProfileModuleFallback → ensureSymlink` 校验「is symlink 或 dsh-managed proxy」失败 → 抛出上面的错误，`vdsh` 立即呈现。
+
+**判定规则（app-boot 的 ensureSymlink，自愈与之对齐）**：
+- 是 symlink/junction（reparse point）→ 保留；
+- 是 dsh proxy：目录内含 `package.json` 且 `dsh.moduleFallback.targets` 键存在（`void 0` 之外都算，含 null/[]）→ 保留；
+- 其余（真实目录/文件）→ 删除；空 @scope 壳 → 删除。
+
+**修复（三处，各司其职）**：
+1. **同步卫生（防再次入库）**：`sync-dsh.ps1` 把 `profiles/*/.dsh-module-fallback/` 作为**内置必备规则**（模板 + 已存在 `.gitignore` 幂等补写 `Ensure-BuiltinIgnoreRules`，不依赖 `gitignore_extra`）；`Sync-Push` 在 `git add` 前检测历史误跟踪（`git ls-files`）→ `git rm -r --cached`（**只动索引，工作区文件保留**）→ 本次提交带删除记录，副机拉取后自动清理。本次已在主力机同步仓库执行并推送（`fcbe48c`，12618 文件移出）。
+2. **启动自愈（vdsh 双通道）**：新增 `vdsh/module_fallback.py::heal_module_fallback(data_dir)`（纯标准库），`vdsh/features/launch.py`（启动前）与 `dsh_cli.py`（转发前）都调用；只删「非链接非 proxy」条目，合法 junction/proxy 一律不动；失败不阻断启动（dsh 自身报错是兜底）。
+3. **拉取指引**：`Sync-Pull` 脏区提示检测到 `.dsh-module-fallback` 变更时，给出「整体删除该缓存目录（dsh 自动重建）再 pull」的命令。
+
+**关键坑提炼**：
+- **junction ≠ 普通目录**：`os.path.islink()` 对 junction 返回 False（Python 3.8-3.12）；用 `os.lstat().st_reparse_tag` / `st_file_attributes & 0x400`（reparse point）或 `os.path.isjunction`（3.12+）判断；测试脚本同样踩过。
+- **git 会把 reparse point 当目录递归提交**（非 TTY 也如此），所以「同步排除规则」必须在 allowlist 之外与 `.gitignore` **双保险**；已经入库的只能 `git rm -r --cached` 一次性移出（`--cached` 只改索引、不动工作区，主机 junction 安全）。
+- **修复顺序**：先让 dsh 重建（启动自愈）再把仓库层面的删除提交同步过去；若副机先 `pull` 拿到删除记录，工作区的真实目录会被 git 正常移除（本次提交即如此）。

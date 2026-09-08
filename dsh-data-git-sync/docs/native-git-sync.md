@@ -69,6 +69,10 @@ llm-*/
 profiles/node_modules/
 # profile 依赖的 node_modules 不入库：两端各自 pnpm install（版本由 pnpm-lock.yaml 锁定）
 profiles/web/node_modules/
+# dsh 模块回退目录不入库：Windows git 会把 junction/链接展开成真实内容入库，
+# 副机检出后 dsh 启动报「exists and is not a symlink or dsh-managed module proxy」。
+# 该目录由 dsh 按本机安装自动重建（链接/proxy），不是需要同步的数据。
+profiles/*/.dsh-module-fallback/
 ```
 
 说明：
@@ -81,6 +85,11 @@ profiles/web/node_modules/
 - `profiles/web/node_modules/`：profile 依赖安装树。不入库（体积与符号链接/junction 均不适合同步），
   副机首次拉取后在 `profiles/web` 下执行一次 `pnpm install`（`pnpm-lock.yaml` 已随仓库同步，
   两端依赖完全相同）。如需「零差异镜像」，删除该行并重新 `git add profiles/web` 即可（详见 §7）。
+- `profiles/*/.dsh-module-fallback/`：**内置必备规则**（`sync-dsh.ps1` 的 `BuiltinIgnoreRules`，与
+  `gitignore_extra` 无关、始终保证存在）。dsh 的模块回退缓存（本机链接/proxy，启动时自动重建）。
+  ⚠️ Windows git 会把目录 junction **展开成真实内容入库**；老仓库曾误跟踪过该目录的，
+  新版本 `vdsh sync push` 会自动检测并 `git rm -r --cached`（只动索引，工作区文件保留），
+  副机拉取删除记录后由 dsh 重建。详见 `native-git-sync.md` §7 故障排查与 `doc/experience.md` §8.5。
 
 ### 2.3 插件与插件配置同步矩阵
 
@@ -353,6 +362,7 @@ git -C ~/.dsh commit
 | 检测到 `.credentials.yaml` 被跟踪 | `git rm --cached .credentials.yaml`，并考虑从历史清除（`git filter-repo`），立即更换密钥 |
 | 换行反复翻动（大量 `\r`/`\n` diff） | 两端 `core.autocrlf` 不一致；统一后 `git add --renormalize .` 一次 |
 | 副机 node_modules 缺失/异常 | 属于正常设计（不入库）：在 `profiles/web` 下执行 `pnpm install` |
+| 副机 dsh 启动报 `exists and is not a symlink or dsh-managed module proxy` | 老仓库误跟踪了 `.dsh-module-fallback/`（Windows git 把 junction 展开成真实文件入库，副机检出后失去链接属性）。**修复**：主力机 `vdsh sync push`（新版本自动检测并 `git rm -r --cached`）；副机 `vdsh sync pull` 后删除该缓存目录（`Remove-Item -Recurse -Force $HOME\.dsh\profiles\web\.dsh-module-fallback`）再启动；新版本 `vdsh` 启动前也会自动清理此类污染 |
 | 副机看不到主力机的用户预设 | `.agent-presets/` 未被同步（旧的 allowlist）；两端 `sync.allowlist` 保持一致后重新 `push`/`pull` |
 | `remote` 提示 git origin 与 vdsh.yaml 不一致 | 旧版 `init` 不持久化远端；重跑 `sync-dsh.ps1 init`（无参=取 git origin 自动回填）即一致 |
 | 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（平台 API 重构，见 §2.3） | 在主力机按 `T:\Open-Source\dsh-plugin\dsh-plugin-migration-guide.md` 适配插件、重新 push；副机 pull + `pnpm install` |

@@ -6,6 +6,91 @@
 
 ---
 
+## 2026-09-08（同日第二波）：副机启动失败 —— 模块回退目录被 git 展开入库
+
+### 1. 背景
+
+上一轮修复推送后，副机 `vdsh`（dsh web 启动）报：
+
+```
+Error: dsh: C:\Users\V.Reason\.dsh\profiles\web\.dsh-module-fallback\node_modules\@codemirror\commands
+exists and is not a symlink or dsh-managed module proxy; remove it so dsh can manage the installation fallback
+```
+
+并非路径解析问题（那轮已解决），而是同步数据本身被污染。
+
+### 2. 根因（真实数据验证）
+
+| 证据 | 说明 |
+|---|---|
+| 主力机 `profiles/web/.dsh-module-fallback/node_modules` 全为 **junction**（LinkType=Junction，指向 `profiles/web/node_modules` 的 pnpm 安装） | 该目录是 dsh 管理的数据：本机链接/proxy，纯可再生缓存 |
+| `.dsh` 仓库 `git ls-files` 计数：**12777 个跟踪文件中 12618 个是 `profiles/web/.dsh-module-fallback/node_modules/**`** | Windows git 默认（core.symlinks 关闭）把 junction 当**普通目录递归**，展开成真实文件入库 |
+| `.gitignore` 只有 `profiles/web/node_modules/`，**没有 `.dsh-module-fallback/`** | 漏规则 → 该目录随 `git add -A` 全量入库 |
+| 副机 checkout 后 `@codemirror/commands` 是真实目录（无链接） | dsh 启动 `ensureSymlink` 校验「symlink 或 dsh-managed proxy」失败 → 抛错，即用户所见 |
+
+app-boot 判定（`packages/boot/app-boot/lib/index.js:416`）：非 symlink 时，目录内 `package.json` 有 `dsh.moduleFallback.targets`（`!== void 0`）才是合法 proxy，否则抛错。
+
+### 3. 改动清单
+
+**A. 同步卫生（防再次入库）——`dsh-data-git-sync/sync-dsh.ps1`**
+- `.gitignore` 生成模板新增 `profiles/*/.dsh-module-fallback/`（带注释说明）；
+- 新增 `Ensure-BuiltinIgnoreRules`：`.gitignore` 已存在时也幂等补写内置规则（不依赖 `gitignore_extra`，`init` 与 push/pull 路径共用）；
+- 新增 `Repair-ModuleFallbackTracking`：`git ls-files` 检测历史误跟踪 → `git rm -r --cached`（**仅索引，工作区文件保留**）→ 本次 push 的提交携带删除记录，副机拉取后自动清理；置于 `Sync-Push` 的 `git add` 之前（先补 `.gitignore` 再移出索引，避免被 `add -A` 重新加回）；
+- `Sync-Pull` 脏区提示：变更集中在 `.dsh-module-fallback` 时给出「整体删除缓存目录（dsh 自动重建）再 pull」的命令。
+
+**B. 启动自愈（vdsh 双通道）——新增 `vdsh/module_fallback.py`**
+- `heal_module_fallback(data_dir)`：纯标准库，按 app-boot 规则清理：symlink/junction（`os.path.islink` + `os.path.isjunction`(3.12+) + `st_reparse_tag`/`st_file_attributes & 0x400` 兜底）保留；dsh proxy（`package.json` 含 `dsh.moduleFallback.targets` 键）保留；真实目录/文件 → 删除；空 @scope 壳 → 删除；
+- `vdsh/features/launch.py`：启动前（CLI 预检后）调用，`data_dir` 取 `effective_data_dir(settings)` 或 `~/.dsh`，清理数 > 0 时 `warn` 说明；
+- `dsh_cli.py`：转发前调用（`DSH_HOME` env → vdsh.yaml `sync.data_dir` → `~/.dsh`），`import` 失败/异常仅提示不阻断（dsh 自身报错兜底）。
+
+**C. 本次已执行的数据仓库修复（主力机 `.dsh` 仓库）**
+- 追加 `.gitignore` 内置规则 → `git rm -r --cached profiles/web/.dsh-module-fallback`（12618 文件移出索引，工作区 junction 完好）→ 提交并推送：`886f23e`（untrack）+ `fcbe48c`（gitignore 规则）。副机下次 `pull` 后工作区真实目录被 git 移除，dsh 启动重建。
+
+### 4. 关键决策与取舍
+
+- **自愈判定与 app-boot 逐位对齐**（不是「凡是目录就删」）：junction/proxy 都是 dsh 合法数据，误删会让主力机启动行为改变；只删「非链接且非 proxy」，与 `ensureSymlink` 的 throw 条件严格互补。
+- **删除动作只针对同步污染**，且优先「存索引→同步→重建」而非直接动工作区：`git rm --cached` 让主机 junction 无感，副机靠 git 删除记录自动清理，两侧行为一致。
+- **自愈放 Python 层（launch + dsh_cli）而非 PS 层**：启动路径已经都在 Python；PS 脚本只管同步卫生；复用无新依赖（纯标准库）。
+- **豁免失败**：清理失败不阻断启动 —— 理论上 dsh 自身报错仍会给出指引；自愈是「大概率自动救回」，不是强保证。
+- **`dsh_cli.py` 的 `_config_value` 通用化**：原 `_repo_from_config` 是针对 `repo` 的专用正则，抽成按 key 读取（仍文本级 + 剥行尾注释 + JSON 反解），`repo` 与 `data_dir` 同源复用，避免第三份实现。
+
+### 5. 验证情况
+
+| 项 | 方法 | 结果 |
+|---|---|---|
+| 自愈逻辑 | 临时目录模拟：junction + @scope/junction + proxy + 顶层真实目录 + @scope 真实目录 + 游离文件 + 空 @scope 壳（`vdsh_mf_test.py`） | 7 项断言全 PASS；清除 4 项（真实目录×2、文件、空壳），junction/proxy 保留；初版「空壳未计数」已修复 |
+| Python 全量 | `python -m py_compile`（module_fallback/launch/dsh_cli） | 0 |
+| PS 脚本 | `[Parser]::ParseFile` + BOM | 0 / `EF BB BF`（编辑后已恢复） |
+| 数据仓库卫生 | 实测 `.dsh`：`git rm -r --cached` 移出 12618 文件 → commit → push `79bd2ec..fcbe48c` | ✓；工作区 junction 完好（`Test-Path node_modules` = True）；status 无残留 |
+| 误跟踪检测 | `git ls-files -- profiles/web/.dsh-module-fallback` | 移出后为空 ✓ |
+
+**未做实机验证**：副机真实 `pull` → dsh 重建全链路（副机不在本机可操作范围）；残留风险极低（删除记录 + 启动自愈双保险）。
+
+### 6. 遗留与后续迭代提示
+
+- **任何含 junction/reparse point 的目录都可能被 git 展开**：同步数据里发现新「真实目录」异常时，先 `git ls-files | 查路径` 确认是否被跟踪，规则进 `BuiltinIgnoreRules` 而非 `gitignore_extra`。
+- `profiles/node_modules/`（顶层共享层）已在既有 `.gitignore` 覆盖；若未来 dsh 增加其它回退/缓存目录，同样追加内置规则。
+- `heal_module_fallback` 的 reparse 判定在 Python < 3.12 走 `st_file_attributes` 兜底（本机 3.13 用 `os.path.isjunction` + `st_reparse_tag`）；低版本 Python 如报 `AttributeError` 请报错反馈。
+- `git rm -r --cached` 的删除记录如果与其它机器本地提交分叉，pull 时可能产生 delete/modify 冲突——`Sync-Pull` 已给「删目录重试」指引。
+- 理论上 `profiles/web/node_modules/` 同样会被展开（旧库已处理）；`vdsh sync status` 现两目录都应有规则且无跟踪。
+
+### 7. 复测清单（回归用）
+
+```powershell
+python -X utf8 -m py_compile vdsh_launcher.py dsh_cli.py vdsh\app.py vdsh\config.py vdsh\settings.py vdsh\spinner.py vdsh\bootstrap.py vdsh\features\sync.py vdsh\features\launch.py vdsh\module_fallback.py
+# PS 解析 + BOM
+$p = (Resolve-Path .\dsh-data-git-sync\sync-dsh.ps1); $e=$null;$t=$null
+[System.Management.Automation.Language.Parser]::ParseFile($p,[ref]$t,[ref]$e)|Out-Null; $e
+[IO.File]::ReadAllBytes($p)[0..2]
+# 自愈冒烟：临时目录模拟后确认只清污染（见 §5 表）
+python -X utf8 $env:TEMP\vdsh_mf_test.py
+# 只读冒烟
+python -X utf8 vdsh_launcher.py sync status
+git -C C:\Users\V.Reason\.dsh ls-files -- profiles/web/.dsh-module-fallback   # 应无输出
+```
+
+---
+
 ## 2026-09-08：同步体验优化 + 副机路径自愈 + 启动失败即时反馈
 
 ### 1. 背景

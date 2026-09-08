@@ -86,6 +86,51 @@ $CommitEmail = if ($env:VDG_SYNC_COMMIT_EMAIL) { $env:VDG_SYNC_COMMIT_EMAIL } el
 # .gitignore 追加内容（vdsh.yaml 的 sync.gitignore_extra；空 = 不追加）。
 $GitIgnoreExtra = if ($env:VDG_SYNC_GITIGNORE_EXTRA) { $env:VDG_SYNC_GITIGNORE_EXTRA } else { '' }
 
+# 内置必备排除规则（与 GitIgnoreExtra 无关，始终保证存在）。
+# .dsh-module-fallback：dsh 的模块回退目录（本机链接/proxy，可再生缓存），
+# Windows git 会把 junction 展开成真实内容入库，副机检出后 dsh 启动报错。
+$BuiltinIgnoreRules = @('profiles/*/.dsh-module-fallback/')
+
+# 模块回退目录（相对 $DshHome）——见上面的 BuiltinIgnoreRules 说明。
+$ModuleFallbackPath = 'profiles/web/.dsh-module-fallback'
+
+# 确保 .gitignore 中存在内置必备排除规则（幂等；.gitignore 缺失时不给初值，由 init 生成）。
+function Ensure-BuiltinIgnoreRules {
+    $gitignorePath = Join-Path $DshHome '.gitignore'
+    if (-not (Test-Path $gitignorePath)) { return }
+    $existing = [System.IO.File]::ReadAllText($gitignorePath, [System.Text.UTF8Encoding]::new($false))
+    $missing = @($BuiltinIgnoreRules | Where-Object { $existing -notmatch [regex]::Escape($_) })
+    if ($missing.Count -gt 0) {
+        $block = "`n# dsh 模块回退目录不入库（内置规则）：Windows git 会把 junction 展开入库，副机检出后 dsh 启动报错。"
+        [System.IO.File]::AppendAllText(
+            $gitignorePath,
+            $block + "`n" + ($missing -join "`n") + "`n",
+            [System.Text.UTF8Encoding]::new($false))
+        Write-Step ('补写 .gitignore 内置排除规则: {0}' -f ($missing -join ', '))
+    }
+}
+
+# 模块回退目录是否仍被 git 跟踪（junction 展开入库的历史残留）。
+function Test-ModuleFallbackTracked {
+    $files = @(& git -C $DshHome ls-files -- $ModuleFallbackPath 2>$null)
+    return $files.Count -gt 0
+}
+
+# 把历史入库的模块回退目录移出版本库（仅索引，不动工作区；dsh 会自动重建）。
+# 返回 $true 表示有改动需要提交；无跟踪/无变化返回 $false。
+function Repair-ModuleFallbackTracking {
+    if (-not (Test-ModuleFallbackTracked)) { return $false }
+    Ensure-BuiltinIgnoreRules
+    Write-Host ("⚠ 发现 .dsh-module-fallback 已被（误）跟踪（{0}，Windows git 把 junction 展开入库）；" -f $ModuleFallbackPath)
+    Write-Host '  正在把它移出版本库（工作区文件保留；本次提交会把删除记录同步，副机拉取后自动清理并由 dsh 重建）…'
+    if ((& git -C $DshHome rm -r --cached --quiet -- $ModuleFallbackPath 2>$null) -ne 0) {
+        Write-Host '   ⚠ 移出索引失败，请手动执行:'
+        Write-Host "     git -C $DshHome rm -r --cached -- $ModuleFallbackPath"
+        return $true
+    }
+    return $true
+}
+
 # 单次 git 操作超时（秒；vdsh.yaml 的 sync.timeout_seconds，0 = 不限时）。
 $TimeoutSeconds = 0
 if ($env:VDG_SYNC_TIMEOUT) {
@@ -341,6 +386,10 @@ llm-*/
 profiles/node_modules/
 # profile 依赖的 node_modules 不入库：两端各自 pnpm install（版本由 pnpm-lock.yaml 锁定）
 profiles/web/node_modules/
+# dsh 模块回退目录不入库：Windows git 会把 junction/链接展开成真实内容入库，
+# 副机检出后 dsh 启动报「exists and is not a symlink or dsh-managed module proxy」。
+# 该目录由 dsh 按本机安装自动重建（链接/proxy），不是需要同步的数据。
+profiles/*/.dsh-module-fallback/
 '@
         if ($GitIgnoreExtra) {
             $gitignoreContent = $gitignoreContent.TrimEnd() + "`n" + $GitIgnoreExtra.TrimEnd() + "`n"
@@ -364,6 +413,8 @@ profiles/web/node_modules/
             Write-Step '已按 vdsh.yaml 的 sync.gitignore_extra 补写 .gitignore 缺失行'
         }
     }
+    # 内置必备排除规则（无论 .gitignore 新建还是已存在，都幂等确保存在）。
+    Ensure-BuiltinIgnoreRules
 
     # 两端 core.autocrlf 必须一致（默认均 true 即可；若改，两台一起改）。
     $crlf = & git -C $DshHome config core.autocrlf 2>$null
@@ -432,6 +483,9 @@ function Sync-Push {
     if ($paths.Count -eq 0) {
         throw '同步清单中没有任何存在的路径（检查 $DSH_HOME 下的 sessions/ 等目录）'
     }
+    # 卫生修复：模块回退目录曾被（误）跟踪时移出版本库（仅索引，不动工作区文件）。
+    # 必须排在 git add 之前：.gitignore 补写 → rm --cached → 本次提交含删除记录。
+    $repairedFallback = Repair-ModuleFallbackTracking
     Write-Step '暂存变更…'
     $addArgs = @('add', '-A', '--') + $paths
     if ((Invoke-DshGit $addArgs) -ne 0) { throw 'git add 失败' }
@@ -481,6 +535,16 @@ function Sync-Pull {
         }
         if ($dirty.Count -gt $shown) {
             Write-Host ('  … 以及另外 {0} 个（完整明细: git -C {1} status --short）' -f ($dirty.Count - $shown), $DshHome)
+        }
+        # 针对性指引：变更集中在 .dsh-module-fallback（junction 展开/本机链接与 HEAD 不一致）时，
+        # 该目录是 dsh 可再生缓存，整体删除后 pull 最干净（dsh 启动时自动重建）。
+        $fallbackDirty = @($dirty | Where-Object { $_.Substring(3) -match '\.dsh-module-fallback' })
+        if ($fallbackDirty.Count -gt 0) {
+            Write-Host ''
+            Write-Host ('  → 提示: 变更集中在 .dsh-module-fallback（模块回退缓存）。该目录由 dsh 自动重建，' +
+                '可整体删除后再 pull:')
+            Write-Host ("    Remove-Item -Recurse -Force '$DshHome\profiles\web\.dsh-module-fallback'")
+            Write-Host '    删除后执行 vdsh 启动，dsh 会重建模块回退缓存。'
         }
         return 3
     }
