@@ -19,7 +19,8 @@ def _valid_repo(path):
 
 
 def _default_repo():
-    return os.environ.get("DSH_REPO") or DEFAULT_REPO
+    """向导默认仓库：DSH_REPO → 本机有效候选探测 → 内置默认。"""
+    return os.environ.get("DSH_REPO") or settings_mod.probe_repo() or DEFAULT_REPO
 
 
 def _ask_repo():

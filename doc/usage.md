@@ -27,12 +27,13 @@ vdsh help / -h / --help          用法
 
 要点：
 
-- 服务窗口**最小化启动、不抢焦点**（CREATE_NEW_CONSOLE + SW_SHOWMINNOACTIVE）；点任务栏图标呼出看日志 / Ctrl+C 停止。
+- 服务窗口**最小化启动、不抢焦点**（CREATE_NEW_CONSOLE + SW_SHOWMINNOACTIVE）；点任务栏图标呼出看日志 / Ctrl+C 停止。node 退出后窗口自动关闭。
+- **启动失败即时反馈**：启动前预检 node / CLI 产物（缺失直接报错，不再空转到超时）；子进程在就绪前退出时立即终止并打印日志尾部（用 `dsh web` 直启能看到报错、用 vdsh 却空转等待的问题由此修复）。
 - 就绪判定以页面中的 `window.__DSH_BOOT__` 引导清单为主标记（0.1.1 起标题品牌化，旧标题 `DeepSeek Harness` 仅作兼容回退）。
 - 浏览器只由启动器在就绪后打开**一次**：服务端以 `--no-open` 关闭其自带自动打开（0.1.1 起 web app 默认自开，会重复）。
 - 工作区种子：经 `--patch <seed.yml>` 注入 `workspace-seed.mjs`（启动器目录下生成），把启动目录幂等注册为 Web UI 工作区；`launcher.workspace_seed: false` 可关闭。
 - 构建：产物缺失或 `apps/cli/src`、`apps/web/src` 的 mtime 新于产物时，询问 `pnpm run build`；非交互输入（EOF）默认不构建。
-- 动画：启动就绪、构建、`sync push/pull/init`、`--sync` 共用同一款转轮动画（帧 + 秒数，8fps 默认）；非 TTY/重定向自动静默。
+- 动画：启动就绪、构建、`sync push/pull/init`、`--sync` 共用同一款转轮动画（帧 + 秒数，8fps 默认）；非 TTY/重定向自动静默。经 vdsh 调用同步时，脚本进度（fetch/push 的 git 对象传输、步骤行）逐行流式显示，转轮消息跟随最近一步。
 
 ### 配置（vdsh setup / config）
 
@@ -44,7 +45,7 @@ vdsh help / -h / --help          用法
 
 | 键 | 默认 | 说明 |
 |---|---|---|
-| `launcher.repo` | `T:\deepseek-harness` | DSH 安装目录（Harness 仓库根，须含 package.json）；向导/`DSH_REPO` 优先 |
+| `launcher.repo` | `T:\deepseek-harness` | DSH 安装目录（Harness 仓库根，须含 package.json）；向导/`DSH_REPO` 优先；配置无效时自动探测本机候选（`C:\deepseek-harness` 等） |
 | `launcher.tailnet` | （空） | 默认 Tailscale 域名（`--tailnet`/`DSH_TAILNET_HOST` 优先） |
 | `launcher.startup_timeout_seconds` | 180 | 服务就绪等待上限 |
 | `launcher.starting_budget_seconds` | 30 | 端口被占但未就绪的等待上限 |
@@ -80,18 +81,20 @@ vdsh help / -h / --help          用法
 ## 数据同步（vdsh sync）
 
 ```powershell
-vdsh sync status                 # 状态：领先/落后、待推送文件、最近提交
+vdsh sync status                 # 状态：领先/落后、待推送文件（逐行列出）、最近提交
 vdsh sync push                   # 收工前：暂存变更 → 提交 → 推送
 vdsh sync pull                   # 开工前：快进优先，分叉时合并；冲突给出指引
-vdsh sync init <URL>             # 一次性初始化（URL 缺省取 sync.remote；成功后把地址写入 vdsh.yaml）
+vdsh sync init [URL]             # 一次性初始化（无参 + 交互终端 → 配置向导；
+                                 #   非交互回退 sync.remote；成功后把地址写入 vdsh.yaml）
 vdsh sync remote [set <URL>]     # 查看/设置远端（更新 git origin 并写入 vdsh.yaml）
 vdsh sync                        # 交互菜单（[1-5] 状态/推送/拉取/初始化/远端）
 vdsh --sync                      # 启动服务前自动 pull（仅实例未运行时；失败只告警）
                                  # 也可配置 launcher.auto_pull: true 每次启动自动 pull
 ```
 
+- **`vdsh sync init` 无参（交互终端）= 副机接入向导**：依次询问 DSH 安装目录（`launcher.repo`，校验含 `package.json`）、DSH 数据目录（`sync.data_dir`，校验绝对路径/可创建）、远端裸仓库地址（`sync.remote`，`file://` 与本地盘路径归一化并校验存在性与裸仓库形态，`http(s)` 仅语法校验），确认后写入 vdsh.yaml 再执行初始化；每项回车用默认值、`s` 跳过、Ctrl+C 取消。跨机复制 launcher 时残留的另一台机器路径（如 `T:/deepseek-harness`、`file:///T:/DataBase/...`）会在向导中明确提示并默认为本机探测值。
 - 设计背景（为什么插件做不到）、同步范围、冲突处理见 `dsh-data-git-sync/docs/native-git-sync.md`；小白教程见 `dsh-data-git-sync/docs/beginner-guide.md`。
-- 输出风格：步骤 `→ 动作`、成功汇总 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；数据目录按 `~/.dsh` 短形式显示一次，不再输出完整路径清单（看明细用 `vdsh sync status`）。`push` 反映推送内容（提交/文件数），`pull` 同样反映拉取内容（远端新增 N 提交 · M 文件），无更新时直接提示「已是最新」并跳过合并。
+- 输出风格：步骤 `→ 动作`、成功汇总 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；数据目录按 `~/.dsh` 短形式显示一次，不再输出完整路径清单。`status` 的「待推送」按行列出（最多 10 条，其余给截断提示）；`push` 反映推送内容（提交/文件数），`pull` 同样反映拉取内容（远端新增 N 提交 · M 文件），无更新时直接提示「已是最新」并跳过合并。fetch/push 以 `--progress` 执行并经 vdsh 逐行流式显示实时进度。
 - 插件与插件配置在默认同步范围内：profile 插件（`profiles/web/` 清单文件与 `cordis.patch.yml`）、用户预设（`.agent-presets/`）、全局配置层（`cordis.patch.yml`）、插件运行数据（`storages/`）与设置（`settings.yaml`）；`profiles/web/node_modules/` 不入库，副机需 `pnpm install`。API 密钥（`.credentials.yaml`）永不入库。
 - 数据目录：`DSH_HOME` → `sync.data_dir` → `~/.dsh`；`DSH_HOME` 与 `sync.data_dir` 均支持 `~` 写法，使用时自动展开为主目录绝对路径。
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
@@ -125,7 +128,7 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
 
 | 变量 | 作用 |
 |---|---|
-| `DSH_REPO` | Harness 仓库根目录（默认 `T:\deepseek-harness`） |
+| `DSH_REPO` | Harness 仓库根目录（默认：`DSH_REPO` → vdsh.yaml → 本机候选探测） |
 | `DSH_TAILNET_HOST` | Tailscale 域名（未传 `--tailnet` 时生效） |
 | `DSH_HOME` | DSH 数据目录（默认 `~/.dsh`） |
 
@@ -136,7 +139,7 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
 | `vdsh_launcher.py` | 入口薄壳 |
 | `vdsh/` | 实现包（分层见 design.md） |
 | `vdsh.cmd` | 命令行薄壳（CMD / PS 5.1 / PS 7） |
-| `dsh.cmd` | 官方 DSH CLI 转发壳 |
+| `dsh.cmd` | 官方 DSH CLI 转发壳（经 `dsh_cli.py` 按 DSH_REPO → vdsh.yaml → 本机候选解析仓库，不再硬编码路径） |
 | `vdsh.yaml` | 用户配置（生成物，不入库） |
 | `workspace-seed.mjs` / `seed.yml` | 工作区种子（生成物，不入库） |
 | `dsh-data-git-sync/` | 同步子工具（sync-dsh.ps1/.cmd + docs） |

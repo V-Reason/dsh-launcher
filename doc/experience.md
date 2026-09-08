@@ -43,6 +43,18 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 - 超时/中断：`$ps.Stop()` 包 try/catch；`$ps.Dispose()`/`$runspace.Dispose()` 放 finally。
 - **必须与上层互斥**：stdout 被 Python 捕获（`[Console]::IsOutputRedirected = $true`）时跳过动画，否则 `\r` 帧会作为文本混入捕获流。
 
+### 1.5 git 进度输出与非 TTY（「空转」元凶，2026-09）
+
+**现象**：`vdsh sync init` 的「获取远端数据」只有转轮，长时间无任何内容级输出（`git fetch` 实际在跑）；直接终端（TTY）却能看到 `Receiving objects…`。
+**原因**：git 的 fetch/push **进度默认只在 stderr 为 TTY 时输出**；stdout/stderr 被捕获（vdsh 管道、重定向）时完全静默，必须显式加 **`--progress`** 才强制输出。非 TTY 下 git 以**换行分隔**输出进度更新（每行一条，可被管道逐行消费）；TTY 下是 `\r` 原地刷新。
+**解决**：长操作一律 `git … --progress`（init/pull 的 fetch、push）；配合 PS 侧**逐行流式**（见 1.6）。追加验证方法：本地 `git init --bare` + mirror，构造增量对象后重定向跑 `fetch --progress`，对照不带 `--progress`（无输出）即复现。
+
+### 1.6 PS 管道的流式 vs 缓冲
+
+**现象**：`& git … 2>&1 | ForEach-Object { "$_" }` 收集后再 `Write-Host ($captured -join "`n")` —— 进度只能在命令结束看到**最后一批**；git 长时间不退出时一无所有。
+**原因**：PowerShell 管道本来就是**逐条流式**处理记录，缓冲是收集变量造成的（也影响下层的 `Invoke-GitSpinner` runspace：输出一次性取回，见 1.4）。
+**解决**：`… | ForEach-Object { Write-Host ("$_") }` 直接透传即流式；需要「先看全部再决策」时才收集。**不要**为了「最后统一打印」而缓冲长命令输出——那会把进度全吞掉。
+
 ## 2. 编码问题
 
 ### 2.1 Python 重定向到 gbk 文件时 UnicodeEncodeError
@@ -58,7 +70,7 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 
 **现象**：`vdsh sync …` 报满屏 `UnexpectedToken`（PS 5.1「字符串缺少终止符/缺少"}"」），脚本 37/104/117/118/129 行全线报错。
 **原因**：`sync_host()` 走 Windows PowerShell 5.1；`.ps1` 无 BOM 时按 ANSI（GBK）解码，中文注释/字符串全部乱码，括号引号错位 → 解析器在字符串中途崩掉（如动画帧串 `⠋⠙⠹…` 丢失收尾引号）。
-**解决**：脚本保持 **UTF-8 with BOM**；本次即因用 UTF-8 无 BOM 的编辑器改写脚本丢掉了 BOM（`git diff` 只见首行多出 `﻿` BOM 字符）。launcher 侧 `vdsh/features/sync.py` 已在执行前检查 BOM，缺失时给出明确报错而非解析墙。
+**解决**：脚本保持 **UTF-8 with BOM**；本次即因用 UTF-8 无 BOM 的编辑器改写脚本丢掉了 BOM（`git diff` 只见首行多出 `﻿` BOM 字符）。launcher 侧 `vdsh/features/sync.py` 已在执行前检查 BOM，缺失时给出明确报错而非解析墙。**注意任何文本编辑工具都可能在重写时剥 BOM**（2026-09 再踩：AI 编码工具的 file 修改/写入 API 保存后 BOM 丢失）——每次编辑后按 §1.1 幂等恢复一次。
 
 ## 3. YAML 配置
 
@@ -75,6 +87,12 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 ### 3.3 文本补丁 vs 全量重写
 
 `remote set` 若整体 dump 配置会毁掉用户注释。`patch_values`（Python）与 `Set-VdgConfigRemote`（PS）都做**行级替换**：匹配 `^空格+键:` 行、保留其余、值 JSON 引号化；键不存在则段内/文件尾追加。两份实现保持语义等价——**改动时须同步**。
+
+### 3.4 键后的行尾注释会污染文本级读取（2026-09）
+
+**现象**：`vdsh sync remote` 显示 `vdsh.yaml: file:///T:/…git" # 默认远端；…` 且误报「git origin 与 vdsh.yaml 不一致」。
+**原因**：文本级读取用 `(?m)^\s+remote:\s*(.*)$` 捕获**整行**——模板/手工配置常在值后跟 `# 说明`，注释被当成值的一部分（值带引号时 `ConvertFrom-Json` 失败 → 折返 `Trim('"')` 仍留注释）。
+**解决**：先剥行尾注释（`-replace '\s+#.*$', ''`）再判断引号/JSON 反解。`Get-VdgConfigRemote`（PS）与 `dsh_cli.py`（Python）都有此逻辑，**两份实现须同步**（与 3.3 同约定）。`patch_values` 写值时不会带注释（整行替换），不要反过来依赖「读取端容忍注释」。
 
 ## 4. 环境 / 沙箱限制（仅供自测参考）
 
@@ -124,4 +142,36 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 ### 7.2 sync init 不持久化远端（「yaml 没生效」错觉）
 
 **现象**：`vdsh sync init <URL>` 后 `vdsh config` 的 `sync.remote` 仍为空，但 push/pull 全部正常——git `origin` 才是实际来源，vdsh.yaml 的 remote 仅作无参回退，故「没生效」的观感与「正常」并存。
-**解决**：`Sync-Init` 成功后调用 `Set-VdgConfigRemote`（与 `remote set` 同一文本级写入函数，保留注释）；重跑 init 传新 URL 会 set-url；无参 init 从 git origin 回填。两个入口（CLI/菜单）都走同一函数，不会再出现「只改一边」。
+**解决**：`Sync-Init` 成功后调用 `Set-VdgConfigRemote`（与 `remote set` 同一文本级写入函数，保留注释）；重跑 init 传新 URL 会 set-url；无参 init 从 git origin 回填。两个入口（CLI/菜单）都走同一函数，不会再出现「只改一边」。**2026-09 补充**：`vdsh sync init` 无参在 TTY 下现在走配置向导（回车确认默认值后行为等价）；非 TTY（脚本化调用）仍是「回填/回退 sync.remote」原逻辑，不受影响。
+
+## 8. 跨机路径与启动失败检测（2026-09）
+
+### 8.1 硬编码绝对路径：跨机复制 launcher 的「必挂点」
+
+**现象**：副机 `dsh web` 报 `Cannot find module 'T:\deepseek-harness\apps\cli\lib\bin.js'`；`vdsh` 报「未找到 Harness 仓库（T:\…）」。
+**原因**：`dsh.cmd` 硬编码 `node "T:\…" `、`config.py DEFAULT_REPO`/`settings.py TEMPLATE` 带主力机路径；副机复制 launcher 目录（含 vdsh.yaml）后全部残留。
+**解决（解析链，三处一致）**：`DSH_REPO`（显式，最高）→ `vdsh.yaml launcher.repo` → `REPO_CANDIDATES`（`C:\deepseek-harness`、`T:\deepseek-harness` 等本机候选，见 `config.py`）。launch 在配置值无效且**非 DSH_REPO 覆盖**时探测并 `patch_values` 自愈；向导默认值同样先探测。**规则：显式环境变量永不覆盖**。
+**注意**：`REPO_CANDIDATES` 是硬编码列表，换新安装位置/新机型记得加候选，或后续改为自动探测。
+
+### 8.2 `pwsh -NoExit` 陷阱：子进程崩溃但句柄不退出
+
+**现象**：node 启动即崩溃（CLI 丢失等），`dsh web` 直启立刻看到报错，`vdsh` 却空转到 180s 超时。
+**原因**：`pwsh -NoExit -Command 'node … *> 日志'` 中 node 退出后 pwsh **仍存活**（-NoExit 的意义），`Popen.poll()` 永远为 None → 拉不走进程，只能靠超时。且输出全被重定向到日志，窗口里空无一物。
+**解决**：去掉 `-NoExit`（window 随 node 退出自动关闭）；`spawn_server` 返回 Popen 句柄，`wait_until_ready(proc=…)` 在就绪前检测 `proc.poll() != None` → 立即终止并打印 `WEB_URL_LOG` 尾部（`_log_tail`，20 行）。启动前另做 node/CLI 产物预检，把常见失败挡在 spawn 之前。
+**边界**：检测只覆盖 launcher 自己拉起的进程；「starting」分支（端口被占，无句柄）仍是 30s 预算 + 超时提示，不做日志启发式（防插件正常告警误判）。
+
+### 8.3 file:// / 本地路径的远端解析怪癖
+
+- `file:///Z:/…`：盘符在 `path`（`/Z:/…`），需去首斜杠 → `Z:\…`；
+- `file://Z:/…`（漏第三个斜杠）：盘符出现在 **netloc**（`Z:`），要按 `netloc + path` 处理，否则被当 UNC 拼成 `\\Z:\…`；
+- `file://host/share/…`：netloc 是主机 → `\\host\share\…`；
+- `X:\…`、`/X:/…`：归一化为 `file:///X:/…` 交给 git（git 接受裸 UNC `\\server\share\…` 原样）；
+- `http(s)://…`：不做本机存在性校验（fetch 实际验证），向导仅语法检查并明示。
+- 「符合预期」的判定：`HEAD` + `objects/`（+`refs/`）存在 = 裸仓库；含 `.git/` = 普通仓库（提示建议裸仓库，不拦截）。
+
+### 8.4 交互向导的输入契约（vdsh sync init 无参）
+
+- 判定 `sys.stdin.isatty()`：TTY 才进向导；非 TTY/EOF/KeyboardInterrupt 一律降级（回退 `sync.remote` 或用法错误），**不阻塞脚本化调用**。
+- 每项 `s`/`skip`/`q` = 跳过该项（不写配置）；EOF/Ctrl+C = 取消整个向导（返回 0，不执行 init）；校验失败重试 3 次后放弃该项并明确提示。
+- 校验策略是「重试提示」而非「拦截放行」：走不过校验的远端，用户可另带 URL 直跑 `vdsh sync init <URL>` 绕过。
+- 写回走 `patch_values`（保留注释）；持续化的键：`launcher.repo`、`sync.data_dir`、`sync.remote`。

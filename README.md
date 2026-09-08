@@ -24,7 +24,7 @@ vdsh                              # 启动服务并打开浏览器（当前目�
 vdsh --sync                       # 启动前自动 pull 数据
 vdsh --tailnet xxx.ts.net         # 手机经 Tailscale 访问
 vdsh sync push / pull / status    # 收工前推送 / 开工前拉取 / 查看状态
-vdsh sync init <URL>              # 一次性初始化同步仓库
+vdsh sync init [URL]              # 一次性初始化同步仓库（无参 = 交互配置向导，副机接入用）
 vdsh sync remote [set <URL>]      # 查看/设置远端仓库位置
 vdsh update dsh                   # 更新 Harness 本体（git pull + install + build）
 vdsh update plugin [web]          # 更新 profile 插件依赖（update --latest）
@@ -42,6 +42,7 @@ vdsh doctor                       # 环境自检
 | [doc/design.md](doc/design.md) | 定位与架构设计：分层、功能协议、关键机制与理由 |
 | [doc/dev.md](doc/dev.md) | 开发指南：新增功能 5 步、编码约定、测试与发布 |
 | [doc/experience.md](doc/experience.md) | 经验与踩坑：PS 5.1 差异、编码、YAML、沙箱限制等 |
+| [doc/devlog.md](doc/devlog.md) | 开发日志：历次迭代的背景、改动、决策与验证 |
 
 ## 功能一览
 
@@ -49,7 +50,7 @@ vdsh doctor                       # 环境自检
 |---|---|
 | `vdsh`（默认） | 启动 dsh web：最小化窗口、就绪检测、工作区注册、打开浏览器 |
 | `vdsh build` | 直接执行仓库构建（问题自动检测亦可），带动画 |
-| `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时 |
+| `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时；`init` 无参时交互配置仓库/数据目录/远端 |
 | `vdsh update dsh / plugin` | 更新 Harness 本体 / profile 插件依赖（分开执行） |
 | `vdsh config` / `setup` / `doctor` | 配置查看 / 重跑向导 / 环境自检 |
 

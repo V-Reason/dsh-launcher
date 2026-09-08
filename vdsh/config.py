@@ -10,6 +10,9 @@ LAUNCHER_DIR = Path(__file__).resolve().parent.parent
 
 # ── Harness 仓库与就绪标记 ────────────────────────────────────────────────
 DEFAULT_REPO = r"T:\deepseek-harness"
+# 本机候选仓库（附 DSH_REPO / vdsh.yaml 之后自动探测；跨机复制 launcher 时自愈）。
+# 顺序即优先级：先本机常见路径（副机 C:\deepseek-harness），再历史默认（T:）。
+REPO_CANDIDATES = [r"C:\deepseek-harness", DEFAULT_REPO]
 PORT = 3080
 URL = "http://127.0.0.1:%d/" % PORT
 

@@ -23,7 +23,7 @@
 
 | 方式 | 写法 |
 |---|---|
-| **vdsh 集成（推荐）** | `vdsh sync status` / `vdsh sync push` / `vdsh sync pull` / `vdsh sync init <URL>` |
+| **vdsh 集成（推荐）** | `vdsh sync status` / `vdsh sync push` / `vdsh sync pull` / `vdsh sync init [URL]`（无参=交互向导） |
 | **双击菜单** | 双击本目录 `sync-dsh.cmd`（菜单：状态 / 推送 / 拉取 / 初始化） |
 | **直接脚本** | `powershell -ExecutionPolicy Bypass -File <本目录>\sync-dsh.ps1 status` |
 
@@ -40,9 +40,10 @@
    ```
 2. **副机接入**（把主力机的 `T:\DataBase` 映射成 `Z:` 后）：
    ```
-   vdsh sync init file:///Z:/DataBase/dsh-sync-repo.git
+   vdsh sync init                      # 无参 = 交互向导：填本机 Harness 仓库、数据目录、远端地址（校验后写入 vdsh.yaml）
    vdsh sync pull
    ```
+   > 或直接 `vdsh sync init file:///Z:/DataBase/dsh-sync-repo.git`；
    > 全新副机目录为空时执行 `git -C "$HOME\.dsh" checkout -b main origin/main`；
    > 副机已有 DSH 数据时执行 `git -C "$HOME\.dsh" merge origin/main`。
 3. **日常同步**：开工前 `vdsh sync pull`，收工前 `vdsh sync push`。
@@ -52,10 +53,11 @@
 ## 脚本用法
 
 ```
-sync-dsh.ps1 status                # 查看状态：领先/落后、待推送文件、最近提交
+sync-dsh.ps1 status                # 查看状态：领先/落后、待推送文件（逐行列出）、最近提交
 sync-dsh.ps1 push                  # 暂存变更 -> 提交（DSH Sync 身份）-> 推送
 sync-dsh.ps1 pull                  # 快进优先，分叉时合并；冲突给出处理指引
 sync-dsh.ps1 init <远程URL>        # 一次性初始化：git init + origin + .gitignore + fetch
+                                   # （经 vdsh sync init 无参调用时 = 交互配置向导）
 sync-dsh.ps1 help                  # 用法说明
 ```
 
@@ -63,9 +65,11 @@ sync-dsh.ps1 help                  # 用法说明
 - 动画：经 `vdsh sync push/pull/init` 调用时显示进度动画（与 vdsh 启动同款转轮 + 秒数）；
   直接/菜单调用时，`fetch`/`push`/`merge` 阶段在**交互终端**同样显示（脚本内 runspace 实现），
   输出重定向自动静默；`push`/`pull` 成功时附总耗时。
-- 进度说明：步骤行 `→ 动作` / 成功 `✓ 结果` / 错误 `✗ 原因` / 警告 `⚠ …`。`pull` 会先反馈
-  「远端新增 N 提交 · M 文件」再合并，无更新时提示「已是最新」；数据目录以 `~/.dsh` 短形式
-  显示一次，不输出完整路径清单（明细见 `vdsh sync status`）。
+- 进度说明：步骤行 `→ 动作` / 成功 `✓ 结果` / 错误 `✗ 原因` / 警告 `⚠ …`。`fetch`/`push`
+  以 `--progress` 执行并经 vdsh 逐行流式显示（对象传输/计数实时可见），转轮消息跟随最近
+  一步；`pull` 会先反馈「远端新增 N 提交 · M 文件」再合并，无更新时提示「已是最新」；
+  数据目录以 `~/.dsh` 短形式显示一次，不输出完整路径清单；`status` 的「待推送」按行列出
+  （最多 10 条，其余显示截断提示）。
 - 同步范围（allowlist）：`.gitignore`、`sessions/`、`profiles/web/`（node_modules 除外）、
   `storages/`、`attachments/`、`memories/`、`settings.yaml`、`.agent-presets/`（用户插件/预设）、
   `cordis.patch.yml`（全局配置层）；不存在自动跳过。插件与插件配置的同步矩阵见

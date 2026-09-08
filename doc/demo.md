@@ -82,8 +82,12 @@ vdsh sync push
 ### 4.3 接入数据仓库
 
 ```powershell
-vdsh sync init file:///Z:/DataBase/dsh-sync-repo.git
+vdsh sync init
 ```
+
+无参即进入**副机配置向导**：依次确认 DSH 安装目录、DSH 数据目录、远端裸仓库地址（每项回车用默认；
+残留主力机路径会有提示，填映射盘对应的 `file:///Z:/…` 或 UNC；详细规则见 [usage.md](usage.md) 数据同步节）。
+等价带参写法：`vdsh sync init file:///Z:/DataBase/dsh-sync-repo.git`。
 
 预期输出（关键句）：
 
@@ -140,7 +144,8 @@ vdsh sync status
 
 ```powershell
 git -C "$HOME\.dsh" rm -r --cached profiles/web/node_modules
-vdsh sync init        # 幂等补写 .gitignore 的 node_modules 排除行（无参取 vdsh.yaml 的 sync.remote）
+vdsh sync init        # 幂等补写 .gitignore 的 node_modules 排除行（TTY 下为配置向导，
+                      #   第 3 项远端回车接受默认即可；等价于旧版「无参取 sync.remote」）
 vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 ```
 
@@ -185,7 +190,8 @@ vdsh sync push        # 提交「不再跟踪 node_modules」并推送
 | 看不到主力机的用户预设 | 两端 `sync.allowlist` 不一致（缺 `.agent-presets`） | 两端同步同一份 vdsh.yaml 配置后，主力机 `push`，白板机 `pull` |
 | 启动报依赖/插件缺失 | 白板机没执行 §4.4 的 `pnpm install`，或 DSH 版本不同 | 执行 `pnpm install`；确认两端 DSH 同版本 |
 | 启动报 `does not provide an export named 'settingsNamespace'` | 插件未适配 DSH 0.1.3-alpha.1（2026-08-30 平台 API 重构）| 在**主力机**按插件迁移指南适配并重新 push；白板机 pull + `pnpm install`（见 §2/§4.4） |
-| `vdsh config` 的 remote 为空但同步正常 | 旧版 `vdsh sync init` 不持久化远端 | 无参重跑 `vdsh sync init` 自动回填（新版本 init 与 `remote set` 都会写入） |
+| `vdsh config` 的 remote 为空但同步正常 | 旧版 `vdsh sync init` 不持久化远端 | 无参重跑 `vdsh sync init`（TTY 下向导回车确认默认值；新版本 init 与 `remote set` 都会写入） |
+| `dsh web` 报 `Cannot find module 'T:\…\apps\cli\lib\bin.js'` | 旧版 `dsh.cmd` 硬编码主力机路径；跨机复制后残留 | 升级 launcher：`dsh.cmd` 现在按 DSH_REPO → vdsh.yaml → 本机候选动态解析；仍报错时运行 `vdsh setup` 或设置 `DSH_REPO` |
 | 提示密钥缺失 | `.credentials.yaml` 永不入库 | 按 §4.6 在本地配置一次 |
 | node_modules 相关文件出现在待推送 | 旧仓库未迁移 | 按 §5 迁移 |
 

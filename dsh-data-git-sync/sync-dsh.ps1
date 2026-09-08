@@ -20,6 +20,8 @@
   输出风格（步骤行在直接终端与经 vdsh 调用时都可见）：
     步骤 → 动作 ｜ 成功 ✓ 结果 ｜ 错误 ✗ 原因 ｜ 警告 ⚠ 说明
     push 反映推送内容（提交/文件数），pull 反映拉取内容（远端新增提交/文件数）。
+    status 的「待推送」按行列出（最多 10 条，其余显示截断提示）；
+    fetch/push 以 --progress 执行，经 vdsh（stdout 被捕获）时逐行流式显示实时进度。
 
 .PARAMETER CommandArgs
   第一个参数为子命令（push / pull / status / init / remote / help），其余为参数：
@@ -151,8 +153,9 @@ function Invoke-DshGit {
     if ($Animated -and -not [Console]::IsOutputRedirected) {
         return Invoke-GitSpinner -GitArgs $GitArgs -Message $Message
     }
-    $captured = & git -C $DshHome @GitArgs 2>&1 | ForEach-Object { "$_" }
-    if ($captured) { Write-Host ($captured -join "`n") }
+    # stdout 被捕获（如经 vdsh / 重定向）时：逐行流式透传，不缓冲到结束——
+    # 长操作（fetch/push 已加 --progress）的实时进度在两种调用方式下都可见。
+    & git -C $DshHome @GitArgs 2>&1 | ForEach-Object { Write-Host ("$_") }
     return $LASTEXITCODE
 }
 
@@ -375,7 +378,7 @@ profiles/web/node_modules/
         $(if (Test-Path (Join-Path $DshHome '.gitignore')) { '已就绪' } else { '缺失（应已在此步生成）' }))
 
     Write-Step '获取远端数据…'
-    if ((Invoke-DshGit @('fetch', 'origin') -Animated -Message '获取远端数据…') -ne 0) {
+    if ((Invoke-DshGit @('fetch', '--progress', 'origin') -Animated -Message '获取远端数据…') -ne 0) {
         Write-Host '→ 注意: origin 暂不可达（首次初始化可稍后再试）'
         return 0
     }
@@ -445,9 +448,9 @@ function Sync-Push {
     if ((Invoke-DshGit $commitArgs) -ne 0) { throw 'git commit 失败' }
 
     Write-Step '推送 origin/main…'
-    if ((Invoke-DshGit @('push') -Animated -Message '推送中…') -ne 0) {
+    if ((Invoke-DshGit @('push', '--progress') -Animated -Message '推送中…') -ne 0) {
         # 上游未建立（全新远端分支）：带 -u 再试
-        if ((Invoke-DshGit @('push', '-u', 'origin', 'main') -Animated -Message '推送中…') -ne 0) {
+        if ((Invoke-DshGit @('push', '-u', 'origin', 'main', '--progress') -Animated -Message '推送中…') -ne 0) {
             Write-Host '   ⚠ 若错误为「non-fast-forward / 远端有更新」：另一台机器已推送过，请先执行 sync-dsh.ps1 pull 合并后再 push。'
             throw 'git push 失败：请确认远端可达（共享盘/内网穿透已挂载）'
         }
@@ -470,14 +473,20 @@ function Sync-Pull {
 
     $dirty = Get-DirtyAllowlist
     if ($dirty.Count -gt 0) {
-        $preview = @($dirty | Select-Object -First 5 | ForEach-Object { $_.Substring(3) })
-        Write-Host ("⚠ 工作区有 {0} 个未提交变更（如 {1}）。先执行 push，再 pull。" -f
-            $dirty.Count, ($preview -join ', '))
+        # 与 status 同款逐行列出（最多 10 条），一眼看出待处理内容。
+        Write-Host ("⚠ 工作区有 {0} 个未提交变更，先执行 push，再 pull:" -f $dirty.Count)
+        $shown = [Math]::Min($dirty.Count, 10)
+        foreach ($entry in ($dirty | Select-Object -First $shown)) {
+            Write-Host ('  - {0}' -f $entry.Substring(3))
+        }
+        if ($dirty.Count -gt $shown) {
+            Write-Host ('  … 以及另外 {0} 个（完整明细: git -C {1} status --short）' -f ($dirty.Count - $shown), $DshHome)
+        }
         return 3
     }
 
     Write-Step '获取远端更新…'
-    if ((Invoke-DshGit @('fetch', 'origin') -Animated -Message '获取远端更新…') -ne 0) {
+    if ((Invoke-DshGit @('fetch', '--progress', 'origin') -Animated -Message '获取远端更新…') -ne 0) {
         throw '获取远端失败：请确认远端可达（共享盘/内网穿透已挂载）'
     }
     if (-not (Test-RemoteMain)) {
@@ -584,8 +593,19 @@ function Sync-Status {
 
     $dirty = Get-DirtyAllowlist
     if ($dirty.Count -gt 0) {
-        $preview = @($dirty | Select-Object -First 5 | ForEach-Object { $_.Substring(3) })
-        Write-Host ("待推送: {0} 个变更（{1}{2}）" -f $dirty.Count, ($preview -join ', '), $(if ($dirty.Count -gt 5) { ' …' } else { '' }))
+        # 逐行列出（最多 10 条）：长列表单行拼接难读，逐行也便于直接复制路径。
+        $shown = [Math]::Min($dirty.Count, 10)
+        if ($dirty.Count -gt $shown) {
+            Write-Host ("待推送: {0} 个变更（显示前 {1} 个）:" -f $dirty.Count, $shown)
+        } else {
+            Write-Host ('待推送: {0} 个变更:' -f $dirty.Count)
+        }
+        foreach ($entry in ($dirty | Select-Object -First $shown)) {
+            Write-Host ('  - {0}' -f $entry.Substring(3))
+        }
+        if ($dirty.Count -gt $shown) {
+            Write-Host ('  … 以及另外 {0} 个（完整明细: git -C {1} status --short）' -f ($dirty.Count - $shown), $DshHome)
+        }
     } else {
         Write-Host '待推送: 无'
     }
@@ -613,6 +633,8 @@ function Get-VdgConfigRemote {
     $match = [regex]::Match($text, '(?m)^\s+remote:\s*(.*)$')
     if (-not $match.Success) { return $null }
     $value = $match.Groups[1].Value.Trim()
+    # 值后可能带行尾注释（模板行有 `# 说明`）：先剥掉再解析引号，避免误判不一致。
+    $value = ($value -replace '\s+#.*$', '').Trim()
     if ($value -eq '') { return $null }
     if ($value.StartsWith('"')) {
         try { return ($value | ConvertFrom-Json) } catch { return $value.Trim('"') }

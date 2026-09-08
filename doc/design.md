@@ -80,7 +80,7 @@ PS 5.1 无法解析 YAML，也不引入新依赖。方案：**Python 解析配�
 ### 3.3 动画（双层互斥设计）
 
 - **Python 层**（launch 就绪 / build / 经 vdsh 的同步）：`Spinner` 线程化重绘 `\r帧 消息 秒数`；`say()` 以「锁 + 暂停事件」把动画行与子进程输出行串行化，动画让位到下一行继续。`run_child_progress` 捕获子进程 stdout+stderr（UTF-8）逐行流式输出，动画与数据行互不覆盖；可选超时（守护线程 `proc.wait(timeout)` → `taskkill /T /F` 失败回退 `kill()`）。
-- **PS 层**（直接调用 / 双击菜单）：`Invoke-GitSpinner` 把 git 放进独立 runspace，主线程 `BeginInvoke` + `IsCompleted` 循环重绘同款式动画，结束时一次性打印 git 输出；**仅当 stdout 未重定向时启用**（经 vdsh 调用时上层已动画，内层退让）。
+- **PS 层**（直接调用 / 双击菜单）：`Invoke-GitSpinner` 把 git 放进独立 runspace，主线程 `BeginInvoke` + `IsCompleted` 循环重绘同款式动画，结束时一次性打印 git 输出；**仅当 stdout 未重定向时启用**（经 vdsh 调用时上层已动画，内层退让）。非动画分支（stdout 被捕获，即经 vdsh 调用）对 git 输出**逐行流式透传**，`fetch`/`push` 带 `--progress`——长操作的实时进度（对象传输/计数）在两种调用方式下都可见，不再缓冲到命令结束；Python 层 `Spinner.say()` 收到 `→ 步骤` 行时刷新转轮消息，长等待期间显示当前动作。
 - 非 TTY/重定向：两层都自动静默，只留纯文本流。
 
 ### 3.4 启动状态机
@@ -106,6 +106,8 @@ probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn �
 - 进程外原生 Git：`sync-dsh.ps1`（PS 5.1 兼容，UTF-8 BOM 文件）持有全部数据操作；vdsh 只做配置注入、动画承载与退出码透传。
 - 退出码语义 `0-4` 是 vdsh 与脚本的契约（`vdsh --sync` 依赖 3/4 分支只告警不阻断）。
 - 配置面（allowlist/身份/.gitignore/远端/超时）全部可经 vdsh.yaml 控制，脚本缺省值即 vdsh.py 内建造的默认。
+- 交互面：`vdsh sync init` 无参（TTY）→ 配置向导（repo/data_dir/remote，见 features/sync.py）；`dsh.cmd` 转发壳经 `dsh_cli.py` 按 DSH_REPO → vdsh.yaml → 本机候选解析仓库路径，不再硬编码（跨机复制 launcher 自愈）。
+- 启动失败面：launch 启动前预检 CLI 产物与 node；`wait_until_ready` 持有进程句柄，就绪前子进程退出 → 立即失败并给日志尾部（不再空转到超时）。
 
 ## 4. 演进决策记录
 
@@ -116,9 +118,18 @@ probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn �
 | sync 用原生 Git 而非插件 | 自指残差问题（旧 dsh-data-sync 插件已废弃） |
 | PS 侧持久化 remote 用文本补丁 | 保留用户注释；两份实现（Python patch_values / PS Set-VdgConfigRemote）逻辑等价 |
 | ps1 用 `powershell`（5.1）作宿主 | 脚本声明 5.1 兼容；无需 PS 7；经 vdsh 时编码/动画由 Python 层控制 |
+| 进度用 git `--progress` + PS 流式透传（2026-09） | git 本身即权威进度；PS 管道天然逐行，无需字节级统计/网络探测；PS 层动画分支（直接终端）保持 runspace 缓冲不变 |
+| sync init 向导放 Python 层（2026-09） | vdsh.yaml 的读取/校验/`patch_values` 属 launcher 域；脚本侧只管 init 本体，退出码 0-4 契约不变 |
+| dsh.cmd 动态解析仓库（2026-09） | 硬编码绝对路径在跨机复制时必挂；解析链 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES`，显式 env 永不覆盖 |
+| 启动失败即时反馈（2026-09） | `-NoExit` 使子进程崩溃后句柄仍存活 → 空转到超时；去掉后靠 `proc.poll()` 检测 + 日志尾部，失败不再无反馈 |
 
 ## 5. 已知边界
 
 - `launcher.port` 不可配置：dsh web 端口未被验证可改，避免虚假开关。
 - 直连 `sync-dsh.ps1` 不读 vdsh.yaml（环境桥只在 vdsh 调用时注入）——文档已注明（usage.md「配置生效范围」）。
 - 构建行为不区分「需要询问」与「强制」：launch 内按需询问、`vdsh build` 直接构建，属有意差异。
+- `REPO_CANDIDATES`（config.py）是**硬编码候选列表**：换安装位置/机型需追加候选（现含 `C:\deepseek-harness`、`T:\deepseek-harness`）；显式 `DSH_REPO` 优先级始终最高。
+- `vdsh sync init` 无参仅 **TTY** 进交互向导；非 TTY 维持「回退 sync.remote / 用法错误」。向导校验是提示式（不截停），用户可带 URL 直跑绕过。
+- 启动失败检测只覆盖 **launcher 自己拉起的进程**（spawn_server 的句柄）；「starting」分支无句柄，仍是 30s 预算 + 超时提示。
+- `dsh_cli.py` 与 `sync-dsh.ps1 Get-VdgConfigRemote` 是**两份文本级读取实现**（剥注释 → JSON 反解），须保持同步（同 `patch_values`/`Set-VdgConfigRemote` 约定）。
+- init 的 fetch 失败仍返回 0（「origin 暂不可达，可稍后再试」）；严格失败语义在 pull/push（退出码 1）。

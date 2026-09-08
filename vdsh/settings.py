@@ -20,6 +20,7 @@ from .config import (
     DEFAULT_REPO,
     MAX_POLLS,
     POLL_GAP,
+    REPO_CANDIDATES,
     STARTING_WAIT_BUDGET,
 )
 
@@ -221,6 +222,26 @@ def load_settings():
 def effective_repo(settings):
     """Harness 仓库根目录：DSH_REPO 环境变量 > vdsh.yaml > 内置默认。"""
     return os.environ.get("DSH_REPO") or settings["launcher"]["repo"] or DEFAULT_REPO
+
+
+def probe_repo():
+    """探测本机有效的 Harness 仓库候选（第一个含 package.json 者），无则 None。
+
+    用于跨机复制 launcher（vdsh.yaml 残留其它机器路径）时的自愈与向导默认值；
+    探测结果只作建议，不覆盖显式配置。
+    """
+    for candidate in REPO_CANDIDATES:
+        try:
+            if os.path.isfile(os.path.join(candidate, "package.json")):
+                return candidate
+        except OSError:
+            continue
+    return None
+
+
+def normalize_repo(raw):
+    """仓库路径归一化：支持 ~ 写法（与数据目录一致），返回绝对路径或原值。"""
+    return os.path.normpath(os.path.expanduser(raw)) if raw else raw
 
 
 def effective_tailnet(cli_tailnet, settings):

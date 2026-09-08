@@ -24,6 +24,8 @@ from ..config import (
     AUTH_REQUIRED_MARKER,
     BOOT_MARKER,
     CLI_REL,
+    EXIT_BUILD,
+    EXIT_DEPS,
     EXIT_NO_PWSH,
     EXIT_PORT_BUSY,
     EXIT_USAGE,
@@ -42,6 +44,10 @@ from ..spinner import Spinner
 
 NAME = "launch"
 SUMMARY = "启动 dsh web 并打开浏览器（默认命令）"
+
+# 启动器拉起的 dsh web 进程在就绪前退出（崩溃/启动失败）时抛出；消息已格式化。
+class ServerExitedError(Exception):
+    pass
 
 
 # ── 启动参数（原 cli.parse_args 的 launch 分支）────────────────────────────
@@ -178,7 +184,17 @@ def _http_ready():
         return False
 
 
-def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_path=None):
+def _log_tail(log_path, max_lines=20):
+    """日志末段（最近 max_lines 行，去尾部空行）；读不到返回 None。"""
+    try:
+        text = Path(log_path).read_text(encoding="utf-8", errors="replace").rstrip("\r\n")
+    except OSError:
+        return None
+    lines = text.splitlines()[-max_lines:]
+    return "\n".join(lines)
+
+
+def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_path=None, proc=None):
     """轮询直到 Harness 就绪；返回就绪信息 dict（或 None=超时）。
 
     ready = {'authed_url': str|None, 'session': Session|None, 'lan_url': str|None}
@@ -207,6 +223,13 @@ def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_pat
             elif _http_ready():
                 ready = {"authed_url": None, "session": None, "lan_url": None}
                 break
+            # 就绪前子进程已退出（典型：CLI 产物缺失/启动崩溃）→ 立即失败并给日志尾部，
+            # 不再无反馈地等待到超时。
+            if proc is not None and proc.poll() is not None:
+                tail = _log_tail(log_path) if log_path else None
+                detail = ("；日志尾部:\n%s" % tail) if tail else ""
+                raise ServerExitedError(
+                    "dsh web 进程已退出（退出码 %s），未完成启动%s" % (proc.returncode, detail))
             time.sleep(gap)
             waited += gap
     finally:
@@ -265,10 +288,15 @@ def spawn_server(repo, workspace, patch_path, tailnet):
     0.1.3-alpha.1 起 dsh web 把「认证 URL 行」（dsh web: http://…/?token=…）打印到
     stdout 作为就绪信号；重定向后 vdsh 才能捕获它完成浏览器认证与就绪判定，
     DSH 控制台输出也落在该日志（排障时查看）。
+    不带 -NoExit：node 退出（含启动崩溃）后窗口自动关闭，launcher 经返回的
+    进程句柄立即感知失败并反馈，而不是空转到超时。
+    返回已启动的 Popen 句柄（供 wait_until_ready 检测提前退出）。
     """
     pwsh = shutil.which("pwsh")
     if pwsh is None:
         die("未找到 pwsh（PowerShell 7），请安装并加入 PATH", EXIT_NO_PWSH)
+    if shutil.which("node") is None:
+        die("未找到 node（Node.js），请安装并加入 PATH", EXIT_DEPS)
     cli = os.path.join(repo, CLI_REL)
     try:
         if WEB_URL_LOG.exists():
@@ -294,14 +322,15 @@ def spawn_server(repo, workspace, patch_path, tailnet):
     startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
     startup.wShowWindow = 7  # SW_SHOWMINNOACTIVE
     try:
-        subprocess.Popen(
-            [pwsh, "-NoExit", "-WorkingDirectory", workspace, "-Command", command],
+        proc = subprocess.Popen(
+            [pwsh, "-WorkingDirectory", workspace, "-Command", command],
             cwd=workspace,
             creationflags=subprocess.CREATE_NEW_CONSOLE,
             startupinfo=startup,
         )
     except OSError as error:
         die("无法弹出服务窗口（%s）" % error, EXIT_NO_PWSH)
+    return proc
 
 
 # ── 工作区种子（用户侧插件，经 --patch 注入）──────────────────────────────
@@ -385,8 +414,20 @@ def run(argv, settings):
     payload = parse_launch_args(argv)
     repo = settings_mod.effective_repo(settings)
     if not os.path.isfile(os.path.join(repo, "package.json")):
-        die("未找到 Harness 仓库（%s），请设置 DSH_REPO 或编辑 vdsh.yaml 的 launcher.repo" % repo,
-            EXIT_USAGE)
+        # 跨机复制 launcher 时 vdsh.yaml 残留另一台机器的仓库路径：探测本机候选并自愈；
+        # DSH_REPO 显式设置时尊重环境变量，不覆盖。
+        probed = settings_mod.probe_repo()
+        if probed and not os.environ.get("DSH_REPO"):
+            warn("配置的 Harness 仓库不存在（%s）；探测到本机仓库 %s，已写入 vdsh.yaml 并继续。"
+                 % (repo, probed))
+            ok_write, _config_warnings = settings_mod.patch_values(
+                {("launcher", "repo"): probed})
+            if not ok_write:
+                warn("vdsh.yaml 写入失败，本次直接使用探测到的仓库")
+            repo = probed
+        else:
+            die("未找到 Harness 仓库（%s），请设置 DSH_REPO 或编辑 vdsh.yaml 的 launcher.repo"
+                "（可运行 vdsh setup 重新配置）" % repo, EXIT_USAGE)
 
     workspace_path = payload["workspace"]
     tailnet = settings_mod.effective_tailnet(payload["tailnet"], settings)
@@ -440,16 +481,26 @@ def run(argv, settings):
             return 0
         build_feature.run_build(repo)
 
+    # 启动前预检：CLI 产物必须存在（缺失时 node 立即崩溃，此前只会空转到超时）。
+    cli_bin = os.path.join(repo, CLI_REL)
+    if not os.path.isfile(cli_bin):
+        die("未找到 dsh CLI 产物（%s）：请先执行 vdsh build；若仓库路径不对，"
+            "运行 vdsh setup 或设置 DSH_REPO 后重试。" % cli_bin, EXIT_BUILD)
+
     patch_path = ensure_seed_patch() if launcher_cfg["workspace_seed"] else None
-    spawn_server(repo, workspace_path, patch_path, tailnet)
+    proc = spawn_server(repo, workspace_path, patch_path, tailnet)
     step("启动中 · %s" % workspace_path)
-    ready = wait_until_ready(
-        deadline=launcher_cfg["startup_timeout_seconds"],
-        gap=launcher_cfg["poll_gap_seconds"],
-        spinner_message="服务启动中，请稍候…",
-        log_path=WEB_URL_LOG,
-        on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r),
-    )
+    try:
+        ready = wait_until_ready(
+            deadline=launcher_cfg["startup_timeout_seconds"],
+            gap=launcher_cfg["poll_gap_seconds"],
+            spinner_message="服务启动中，请稍候…",
+            log_path=WEB_URL_LOG,
+            proc=proc,
+            on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r),
+        )
+    except ServerExitedError as error:
+        die(str(error))
     if ready is None:
         warn("等待超时，服务可能启动失败；请手动打开 %s（DSH 日志: %s）" % (URL, WEB_URL_LOG))
     return 0

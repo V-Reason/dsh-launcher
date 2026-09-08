@@ -159,7 +159,20 @@ git fetch origin
 git checkout -b main origin/main        # 把远端数据完整落下
 ```
 
-配套脚本可一步完成（init 会自动识别「全新目录」并 `checkout -b main origin/main`）：
+经 dsh-launcher 可一步完成（init 会自动识别「全新目录」并 `checkout -b main origin/main`），
+**副机推荐无参调用**——交互向导按本机填写三项配置（跨机复制 launcher 时 vdsh.yaml 残留
+主力机路径也无妨）：
+
+```powershell
+vdsh sync init
+# 向导第 1/3 项：DSH 安装目录（校验含 package.json；当前配置无效时默认改用本机探测值）
+# 向导第 2/3 项：DSH 数据目录（校验绝对路径/可创建；默认 ~/.dsh）
+# 向导第 3/3 项：远端裸仓库地址（file:// 归一化 + 本地存在性与裸仓库形态校验，
+#                残留的 file:///T:/… 会提示「主力机路径，请映射共享盘后用 Z:/ 或 UNC」）
+# 三项确认后写入 vdsh.yaml（launcher.repo / sync.data_dir / sync.remote）再执行初始化
+```
+
+等价的带参脚本调用（跳过向导）：
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/dsh-sync-repo.git
@@ -170,7 +183,7 @@ powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/d
 1. 安装与主力机**同版本**的 DSH（安装本体不被同步，bundle 来自安装；插件 API 与 DSH
    版本配对，见 §2.3，版本不一致会启动失败）。
 2. **先不要启动 DSH**——启动会写 `sessions/`，导致下一次 init 判定为「已有数据」而走 merge 分支。
-3. `vdsh sync init <URL>`（或上方的原生命令）→ 远端数据落盘。
+3. `vdsh sync init`（无参交互向导；或 `vdsh sync init <URL>`）→ 远端数据落盘。
 4. `cd ~/.dsh/profiles/web; pnpm install`——`profiles/web/node_modules/` 不入库，版本由已同步的
    `pnpm-lock.yaml` 锁定，装出来的依赖与主力机完全一致。
 5. 启动 DSH：boot 会自动重建 `profiles/node_modules/`（机器本地的符号链接农场）与其它运行目录。
@@ -240,21 +253,23 @@ powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 pull
 powershell -ExecutionPolicy Bypass -File sync-dsh.ps1 init file:///Z:/DataBase/dsh-sync-repo.git
 ```
 
-安装 dsh-launcher 后，上面四条分别等价于
-`vdsh sync status` / `vdsh sync push` / `vdsh sync pull` / `vdsh sync init file:///Z:/...`；
-`vdsh --sync` 启动服务前自动先 `pull` 一次（实例未运行时；失败仅告警不阻塞）。
+安装 dsh-launcher 后，上面三条分别等价于
+`vdsh sync status` / `vdsh sync push` / `vdsh sync pull`，
+`vdsh sync init`（无参，交互终端）执行 §3.2 的副机接入向导（带 URL 则等价于
+`sync-dsh.ps1 init <URL>`）；`vdsh --sync` 启动服务前自动先 `pull` 一次
+（实例未运行时；失败仅告警不阻塞）。
 
 脚本行为要点：
 
 | 子命令 | 行为 |
 |---|---|
-| `init` | `git init -b main`（如未初始化）、添加 `origin`（缺 `-RemoteUrl` 报错）、缺失时生成 `.gitignore`（UTF-8 无 BOM）、`fetch origin` 并打印下一步（全新副机 checkout / 已有数据 merge 或 reset --soft） |
-| `push` | 过滤**实际存在**的 allowlist 路径 → `git add -A -- <路径>` → 有暂存才提交（`DSH Sync` 身份）→ `push`（失败自动重试 `push -u origin main`；非快进时提示先 pull） |
-| `pull` | 工作区脏 → 提示先 push（退出码 3）；否则 `fetch` → 先反馈**远端新增 N 提交 · M 文件**（与 push 反映推送内容对称）→ 快进优先，分叉走常规合并；无更新直接提示「已是最新」并跳过合并；冲突/无本地提交给出指引（退出码 3） |
-| `status` | 分支/远端 URL、`HEAD...origin/main` 前后差异、待推送文件预览、最近提交 |
+| `init` | `git init -b main`（如未初始化）、添加 `origin`（缺 `-RemoteUrl` 报用法错误；经 `vdsh sync init` 无参调用时为交互配置向导）、缺失时生成 `.gitignore`（UTF-8 无 BOM）、`fetch origin --progress` 并打印下一步（全新副机 checkout / 已有数据 merge 或 reset --soft） |
+| `push` | 过滤**实际存在**的 allowlist 路径 → `git add -A -- <路径>` → 有暂存才提交（`DSH Sync` 身份）→ `push --progress`（失败自动重试 `push -u origin main`；非快进时提示先 pull） |
+| `pull` | 工作区脏 → 按行列出未提交变更（最多 10 条）并提示先 push（退出码 3）；否则 `fetch --progress` → 先反馈**远端新增 N 提交 · M 文件**（与 push 反映推送内容对称）→ 快进优先，分叉走常规合并；无更新直接提示「已是最新」并跳过合并；冲突/无本地提交给出指引（退出码 3） |
+| `status` | 分支/远端 URL、`HEAD...origin/main` 前后差异、待推送文件**逐行列出**（最多 10 条，其余给截断提示）、最近提交 |
 | `help` | 打印用法 |
 
-输出风格：步骤 `→ 动作`、成功 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；每命令头部以短目录（`~/.dsh`）显示一次数据目录，不再输出完整路径清单；步骤行在「直接终端」与「经 vdsh（stdout 被捕获）」两种调用下都可见（PS 层动画的 `-Message` 仅直接终端可见）。
+输出风格：步骤 `→ 动作`、成功 `✓ 结果`、错误 `✗ 原因`、警告 `⚠ …`；每命令头部以短目录（`~/.dsh`）显示一次数据目录，不再输出完整路径清单；`fetch`/`push` 以 `--progress` 执行，经 vdsh（stdout 被捕获）时逐行流式显示实时进度（转轮消息跟随最近一步）；步骤行在「直接终端」与「经 vdsh（stdout 被捕获）」两种调用下都可见（PS 层动画的 `-Message` 仅直接终端可见）。
 
 > 退出码语义（供 `vdsh --sync` 等调用方区分）：`0` 成功（含「无变更可推送」）；`1` 硬失败
 > （git 命令失败/远端不可达）；`2` 用法错误；`3` 被阻塞（脏工作区、冲突中间态、远端 main 未建立）；

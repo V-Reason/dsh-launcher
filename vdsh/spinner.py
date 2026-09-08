@@ -101,12 +101,17 @@ class Spinner:
 
         时序：先置暂停 → 持锁擦除当前动画行并打印 line + 换行 → 解除暂停；
         动画循环持锁时检查暂停态，保证与主线程写入串行化，无竞态。
+        步骤行（以「→ 」开头）会同步刷新动画消息，长等待期间转轮显示当前动作。
         """
         if not self._enabled:
+            if line.startswith("→ "):
+                self.message = line[2:].strip()
             print(line)
             return
         self._paused.set()
         with self._lock:
+            if line.startswith("→ "):
+                self.message = line[2:].strip()
             self._erase()
             sys.stdout.write(line + "\n")
             sys.stdout.flush()
