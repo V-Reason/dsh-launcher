@@ -25,6 +25,15 @@ TITLE_MARKER = "DeepSeek Harness"
 # GET / 无 ?token= 或 cookie → 401，正文含此串（据此识别"已在运行"的实例）。
 AUTH_REQUIRED_MARKER = "dsh web authentication required"
 
+# Connection RPC 通道契约（源码：client/connection/src/rpc-host.ts、api/gateway/src/index.ts）：
+#   端点路径 = /api/<namespace>/<method>（点号写法不存在，得到 404 纯文本）；
+#   请求体   = {"type":"client-request","rpcId":…,"method":"<namespace>/<method>",
+#               "payload":{"args":{"request":{…}}}}（args 下的键 = 方法形参名，见
+#               workspace-controller 的 @Remote('create') create(request)）。
+# /api 在端点分发之前先过两道闸：Host 围栏（未声明域名 → 403）与浏览器会话认证（无 cookie → 401）。
+WORKSPACE_CREATE_ENDPOINT = "workspace/create"
+API_RPC_URL = "http://127.0.0.1:%d/api" % PORT
+
 # dsh web 启动日志（stdout/stderr 全流重定向处）：捕获「认证 URL 行」
 # （dsh web: http://127.0.0.1:3080/?token=…，Loader 结算后打印的就绪信号）与
 # DSH 控制台输出（排障时查看）。

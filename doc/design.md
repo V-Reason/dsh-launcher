@@ -125,6 +125,8 @@ probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn �
 | 模块回退目录按 app-boot 规则自愈（2026-09） | git 把 junction 展开入库 → 副机检出真实目录 → dsh 报「not a symlink or dsh-managed module proxy」。`heal_module_fallback` 严格复制 ensureSymlink 判定（链接/proxy 保留，其余删除），launch 与 dsh_cli 双通道调用；比报错驱动的手工删除可预期 |
 | `.dsh-module-fallback` 列入内置 ignore 规则（2026-09） | 该目录是 dsh 可再生缓存（纯本机链接/proxy），同步必有污染；不作为 `gitignore_extra` 交给用户配置，避免「忘配」复发；`Sync-Push` 自动 `git rm -r --cached` 历史误跟踪（只动索引） |
 | 聊天记录跨机同步**搁置**（2026-09） | 实测副机数据文件在、UI 不显示：DSH 按**本机工作区绝对路径**组织会话（`sessions/<projectKey(cwd)>/`，见 `session-persistence-jsonl/src/format.ts`；`storages/workspace.json` 的 `tables.workspaces[].path` 也是绝对路径）。跨机路径不同 → 会话目录键与 workspace 注册路径对不上；副机查询按副机 cwd 算键，找不到主力机路径键下的数据。属 DSH 数据模型限制，非同步脚本可修；launcher 侧扁平化/重映射是在给 DSH 未提供的语义打补丁，长期维护成本高 → 搁置（详见 `devlog.md` 第三波、`demo.md` §1 已知限制） |
+| 工作区 RPC 按 `/api/<ns>/<method>` + `args.request` 修正（2026-09） | 原实现用 `/api/workspace.create` + 裸 `payload:{path}`，该形态自 RPC 通道引入起就不存在 → 恒 404 纯文本，被 `resp.json()` 的 `Expecting value…` 掩盖（只有「实例已在运行」才走到这条 RPC，故长期未被发现）。失败诊断同步改为打印 `HTTP <code>：<正文摘要>`，让协议漂移一眼可见 |
+| tailnet 告警改围栏探测（2026-09） | 无条件告警在「tailnet 来自 vdsh.yaml、实例本就带 `--trusted-host`」时是假警报。改用 `Host: <域名>` 打 `/api` 读围栏结果（未声明 → 403，已声明 → 401/404），**仅 403 告警**；探测无需 cookie（围栏先于认证） |
 
 ## 5. 已知边界
 

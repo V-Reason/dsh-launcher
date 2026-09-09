@@ -21,6 +21,7 @@ import requests
 
 from .. import settings as settings_mod
 from ..config import (
+    API_RPC_URL,
     AUTH_REQUIRED_MARKER,
     BOOT_MARKER,
     CLI_REL,
@@ -38,6 +39,7 @@ from ..config import (
     TITLE_MARKER,
     URL,
     WEB_URL_LOG,
+    WORKSPACE_CREATE_ENDPOINT,
 )
 from ..console import die, say, step, warn
 from ..module_fallback import heal_module_fallback
@@ -240,43 +242,75 @@ def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_pat
     return ready
 
 
-def register_workspace(path, session=None):
-    """向已在运行的 Harness 实例注册工作区（POST /api/workspace.create，幂等）。
+def _body_snippet(resp, limit=160):
+    """响应正文单行摘要（截断）——协议漂移时替代难懂的 JSON 解析异常。"""
+    return " ".join(resp.text.split())[:limit] or "（空响应）"
 
-    0.1.3-alpha.1 起 /api 需要浏览器会话 cookie：传入已认证的 session（从
-    启动日志的认证 URL 交换得到）才能通过；无 cookie 时后端返回 401。
+
+def register_workspace(path, session=None):
+    """向已在运行的 Harness 实例注册工作区（POST /api/workspace/create，幂等）。
+
+    Connection RPC 契约（0.1.3-alpha.1，见 config.py 的 WORKSPACE_CREATE_ENDPOINT）：
+    端点路径为 /api/<namespace>/<method>，报文为 payload.args.request；
+    点号端点与裸 payload 都会得到 404 纯文本（曾表现为「Expecting value: line 1
+    column 1 (char 0)」这类无信息量的告警）。
+    /api 另需浏览器会话 cookie：传入已认证的 session（从启动日志的认证 URL 交换
+    得到）才能通过；无 cookie 时后端返回 401。
     返回 True 表示注册成功；任何失败仅告警，不阻断打开浏览器。
     """
+    endpoint = WORKSPACE_CREATE_ENDPOINT
     envelope = {
         "type": "client-request",
         "rpcId": uuid.uuid4().hex,
-        "method": "workspace.create",
-        "payload": {"path": path},
+        "method": endpoint,
+        "payload": {"args": {"request": {"path": path}}},
     }
     client = session if session is not None else requests
     try:
         resp = client.post(
-            "http://127.0.0.1:%d/api/workspace.create" % PORT,
+            "%s/%s" % (API_RPC_URL, endpoint),
             json=envelope,
             timeout=POLL_TIMEOUT,
             proxies={"http": None, "https": None},
         )
-        if resp.status_code == 401:
-            warn("工作区注册需要浏览器认证（先用 DSH 控制台打印的 URL 打开一次页面）")
-            return False
-        data = resp.json()
-        result = data.get("result")
-        if result is not None and result.get("ok") is True:
-            return True
-        error = result.get("error") if isinstance(result, dict) else None
-        code = error.get("code") if isinstance(error, dict) else "unknown"
-        warn("工作区注册被拒绝（%s: %s）" % (
-            code,
-            error.get("message", "") if isinstance(error, dict) else "",
-        ))
-    except (requests.RequestException, ValueError) as error:
+    except requests.RequestException as error:
         warn("工作区注册失败（%s）" % error)
+        return False
+    if resp.status_code == 401:
+        warn("工作区注册需要浏览器认证（先用 DSH 控制台打印的 URL 打开一次页面）")
+        return False
+    try:
+        result = resp.json()["result"]
+    except (ValueError, KeyError, TypeError):
+        warn("工作区注册失败（HTTP %d：%s）" % (resp.status_code, _body_snippet(resp)))
+        return False
+    if isinstance(result, dict) and result.get("ok") is True:
+        return True
+    error = result.get("error") if isinstance(result, dict) else None
+    if isinstance(error, dict):
+        warn("工作区注册被拒绝（%s: %s）" % (error.get("code", "unknown"), error.get("message", "")))
+    else:
+        warn("工作区注册失败（HTTP %d：%s）" % (resp.status_code, _body_snippet(resp)))
     return False
+
+
+def tailnet_is_trusted(tailnet):
+    """运行中的实例是否信任该域名（Host 围栏）：403=未信任，其余=已信任，None=无法判定。
+
+    用请求头 Host 冒充该域名打 /api：围栏先于认证与端点分发生效，故无需 cookie
+    （已信任 → 401/404，未信任 → 403，实测见 doc/experience.md §7.3）。
+    探测用「传给 --trusted-host 的同一个字符串」，与启动参数同源。
+    """
+    try:
+        resp = requests.get(
+            "%s/%s" % (API_RPC_URL, WORKSPACE_CREATE_ENDPOINT),
+            headers={"Host": tailnet},
+            timeout=POLL_TIMEOUT,
+            proxies={"http": None, "https": None},
+        )
+    except requests.RequestException:
+        return None
+    return resp.status_code != 403
 
 
 def open_url(url):
@@ -386,7 +420,9 @@ def _open_existing(workspace_path, tailnet, want_browser, ready=None):
     if want_browser:
         open_url(authed_url or URL)
     say("vdsh · 已在运行 → %s" % URL)
-    if tailnet is not None:
+    # 只在围栏明确拒绝（403）时告警：实例可能本就带 --trusted-host（如 tailnet
+    # 来自 vdsh.yaml），无条件告警是假警报；探测失败/未知则保持安静。
+    if tailnet is not None and tailnet_is_trusted(tailnet) is False:
         warn("运行中的实例未带 --trusted-host，手机访问会 403；"
              "请关闭后重启（vdsh --tailnet %s）" % tailnet)
 

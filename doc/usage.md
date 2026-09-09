@@ -32,6 +32,7 @@ vdsh help / -h / --help          用法
 - 就绪判定以页面中的 `window.__DSH_BOOT__` 引导清单为主标记（0.1.1 起标题品牌化，旧标题 `DeepSeek Harness` 仅作兼容回退）。
 - 浏览器只由启动器在就绪后打开**一次**：服务端以 `--no-open` 关闭其自带自动打开（0.1.1 起 web app 默认自开，会重复）。
 - 工作区种子：经 `--patch <seed.yml>` 注入 `workspace-seed.mjs`（启动器目录下生成），把启动目录幂等注册为 Web UI 工作区；`launcher.workspace_seed: false` 可关闭。
+- 实例已在运行：经 Connection RPC（`/api/workspace/create`）把当前目录注册进该实例（幂等，成功无输出、失败只告警）；**仅在探测到运行实例确实不信任所配 tailnet 域名时**才提示「未带 --trusted-host」（Host 围栏 403 判定，见 experience.md §7.3）。
 - 构建：产物缺失或 `apps/cli/src`、`apps/web/src` 的 mtime 新于产物时，询问 `pnpm run build`；非交互输入（EOF）默认不构建。
 - 动画：启动就绪、构建、`sync push/pull/init`、`--sync` 共用同一款转轮动画（帧 + 秒数，8fps 默认）；非 TTY/重定向自动静默。经 vdsh 调用同步时，脚本进度（fetch/push 的 git 对象传输、步骤行）逐行流式显示，转轮消息跟随最近一步。
 

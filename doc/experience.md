@@ -137,12 +137,24 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 
 **原因（platform 源码）**：8-30 重构后 `dsh web` 对根页面与 `/api` 实施浏览器会话认证（`packages/client/connection/src/browser-auth.ts`）：`GET /?token=<per-process launch token>` → 303 → 干净 `/` + HttpOnly cookie；无 token/无 cookie 一律 401。token 由服务器进程生成，**无法预先得知**；其「URL 行」`dsh web: http://127.0.0.1:3080/?token=…` 在 Loader 树结算后打印到 stdout（`--no-open` 也打印，`printUrl` 默认 true）。
 
-**解决（launcher）**：启动时把 pwsh 命令输出全流重定向到 `%TEMP%\vdsh-web.log` → 轮询截获 URL 行作为就绪信号 → `requests.Session` 跟随 303 完成 token→cookie 交换 → 打开带 token 的 URL（浏览器首访换 cookie）、复用 Session 调 `/api/workspace.create`；`probe_harness` 识别 401 正文为「auth（已在运行）」。已运行实例若由启动器启动，日志里仍是当前进程的 token，可复用；否则只能提示用户用 DSH 窗口打印的 URL。
+**解决（launcher）**：启动时把 pwsh 命令输出全流重定向到 `%TEMP%\vdsh-web.log` → 轮询截获 URL 行作为就绪信号 → `requests.Session` 跟随 303 完成 token→cookie 交换 → 打开带 token 的 URL（浏览器首访换 cookie）、复用 Session 调 `/api/workspace/create`；`probe_harness` 识别 401 正文为「auth（已在运行）」。已运行实例若由启动器启动，日志里仍是当前进程的 token，可复用；否则只能提示用户用 DSH 窗口打印的 URL。
+
+**RPC 契约（2026-09 修正，二次启动告警的根因）**：端点恒为 `/api/<namespace>/<method>`，报文为 `{"type":"client-request","rpcId":…,"method":"<namespace>/<method>","payload":{"args":{"request":{…}}}}`（`args` 下的键 = 方法形参名；`@Remote('create') create(request)` → `args.request`）。点号端点（`/api/workspace.create`）与裸 `payload:{path}` 自 RPC 通道引入（2026-08-07）起就不存在，只会得到 **404 纯文本 `not found`**。全新启动走 `--patch` 种子插件，不经过这条 RPC，所以只有「实例已在运行」才会暴露。
+
+**排错识别法**：`Expecting value: line 1 column 1 (char 0)`（`resp.json()` 对非 JSON 正文的报错）= 端点或报文写错，**不是**业务失败。现在这类失败会直接打印 `HTTP <code>：<正文摘要>`（`_body_snippet`），不再让 JSON 解析异常当门面。
 
 ### 7.2 sync init 不持久化远端（「yaml 没生效」错觉）
 
 **现象**：`vdsh sync init <URL>` 后 `vdsh config` 的 `sync.remote` 仍为空，但 push/pull 全部正常——git `origin` 才是实际来源，vdsh.yaml 的 remote 仅作无参回退，故「没生效」的观感与「正常」并存。
 **解决**：`Sync-Init` 成功后调用 `Set-VdgConfigRemote`（与 `remote set` 同一文本级写入函数，保留注释）；重跑 init 传新 URL 会 set-url；无参 init 从 git origin 回填。两个入口（CLI/菜单）都走同一函数，不会再出现「只改一边」。**2026-09 补充**：`vdsh sync init` 无参在 TTY 下现在走配置向导（回车确认默认值后行为等价）；非 TTY（脚本化调用）仍是「回填/回退 sync.remote」原逻辑，不受影响。
+
+### 7.3 「运行中的实例未带 --trusted-host」假告警（2026-09 修正）
+
+**现象**：DSH 已在运行时再执行 `vdsh`，即使实例启动时确实带了 `--trusted-host`（tailnet 来自 `vdsh.yaml` 的 `launcher.tailnet`），仍打印「运行中的实例未带 --trusted-host，手机访问会 403；请关闭后重启」。
+
+**原因**：`_open_existing` 原先只判断 `tailnet is not None`，无条件告警——它从未核实运行实例是否真的信任该域名。
+
+**解决**：改用 **Host 围栏探测**（`tailnet_is_trusted`）：用请求头 `Host: <域名>` 打 `/api/<任意端点>`，围栏在认证与端点分发**之前**生效，因此无需 cookie —— 实测「已信任 → 401/404，未信任 → 403」（`packages/client/connection/src/api-request-trust.ts`：Host 既非 loopback 也不在 `trustedHosts` → 403）。**只有明确 403 才告警**，探测失败/未知一律静默（宁缺勿假）。探测用「传给 `--trusted-host` 的同一个字符串」，与启动参数同源。
 
 ## 8. 跨机路径与启动失败检测（2026-09）
 
