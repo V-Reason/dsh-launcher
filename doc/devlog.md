@@ -6,6 +6,88 @@
 
 ---
 
+## 2026-09-10：插件更新可信化 + TTY 动画瘦身 + pnpm `[WARN]` 排查
+
+### 1. 背景
+
+用户跑 `vdsh update plugin` 看到成片 `[WARN]`（`HEAD https://github.com/… error (ECONNRESET/ETIMEDOUT). Will retry in …` 与
+`Issues with peer dependencies found`），怀疑是错误或被吞掉的错误；同时提出两个需求：**（a）要能保证插件「确确实实」被正确更新**，
+**（b）更新时的 TTY 动画要去掉多余无关的说明**。
+
+### 2. 排查结论（先定性，再改码）
+
+- `[WARN]` 不来自 vdsh（vdsh 只用 `vdsh ·/⚠/✗`）。HEAD 只有一处来源：pnpm 的 `isRepoPublic()` 探针（`method:'HEAD'` +
+  `retry:{retries:2,factor:2,minTimeout:500}`），失败被 `catch { return false }` 吞掉，只影响「tarball vs git 解析」，**非错误**。
+- peer 提示是 DSH 的 profile 设计（`app-boot/src/profile.ts` 写 `nodeLinker: hoisted` + `autoInstallPeers: false`，
+  peer 由 `$DSH_HOME/profiles/node_modules` 安装层提供）；`pnpm peers check` 的 16 项全部可解析。
+- `Packages: -2` 是 pnpm 统计行（清 2 个过期 node_modules 条目），manifest/lockfile 未变，5/5 依赖在位。
+- **底层条件是真的**：实测 `github.com:443` TCP FAIL，而 `github.com:22`/`codeload.github.com:443`/`registry.npmjs.org:443` 均 OPEN
+  → 只阻断该端点；pnpm 因此回退 git/SSH 解析（lockfile 记为 `git+ssh://…#<sha>`），代价仅耗时。
+- 排查中发现两个**真问题**：旧实现只比已装包 `version`，git 依赖「commit 变了、版本号没变」会被误判为「无变化」；
+  且无法区分「装了 ≠ 生效」。
+
+### 3. 改动清单
+
+1. **新增 `vdsh/profile_state.py`**：三重证据校验（`package.json` ↔ `pnpm-lock.yaml` ↔ `node_modules/.modules.yaml` 的
+   `hoistedLocations` 解析身份），git 比 commit；生效方式四态（`profile 层`/`预设挂载`/`普通依赖`/`未激活`）；
+   硬失败（依赖缺失、声明 bundle 却未激活、lockfile 与磁盘不一致、未记入 lockfile）与告警分级；缺 PyYAML/无 `hoistedLocations` 时降级为告警而非假失败。
+2. **`features/update.py`**：`_update_plugin` 改为前后快照 + 差异（`diff_plugins`），结束只打**一行结论**
+   （更新了什么 / 三方一致 / 生效方式 / pnpm 尾注）；校验失败逐条 `vdsh ✗` + 退出码 1；`pnpm install`（update dsh）同样接入折叠与网络失败提示；
+   旧 `_installed_versions()` 删除（避免两套语义）。另加「pnpm 确实跑了」的旁证：全程没有 pnpm 运行标记时，结论行如实附注
+   「未见 pnpm 运行标记（更新可能未真正执行，可用 vdsh doctor 复核）」，避免把「状态没变」说成「已更新」。
+3. **`spinner.py`**：`Spinner.set_message()`（只改转轮文案）；`run_child_progress(..., collect=, quiet=, replay_on_failure=)`——
+   TTY 下折叠低价值行并把进度写进转轮，非 0 退出时把折叠行**原样补打**；非 TTY 恒为全量透传。
+4. **`console.py`**：新增 `fail()`（非致命 `vdsh ✗`，用于一次报多条校验失败）。
+5. **`features/doctor.py`**：profile 段改用 `profile_state.verify()`，逐插件打 `版本/commit · 生效方式`，失败/告警分级，peer 一行指引。
+6. **配置**：新增 `animation.quiet`（默认 true；TTY 折叠 pnpm 低价值行，false = 全量排障用），同步 `DEFAULTS`/`VALIDATORS`/`TEMPLATE`/`config_report`/`app.py` 与 `vdsh.yaml`。
+7. **文档**：`usage.md`（更新校验说明 + `[WARN]` 怎么看 + `github.com:443` 处置 + 配置键）、`experience.md` §7.4/§7.5、本条目、`dev.md` 目录职责表。
+
+### 4. 关键决策与取舍
+
+- **不折叠失败证据**：瘦身只作用于成功路径；任何非 0 退出都把折叠行补打（`replay_on_failure`）。非 TTY 一律全量，保证日志/CI 可回溯。
+- **语义留在功能层**：spinner 只提供机制（`quiet` 回调 / `collect` / 环形缓冲），「什么算噪声」由 `update.py` 的 `_PnpmNoise` 决定（与 dev.md §3 分层一致）。
+- **不新增说明行**：pnpm 噪声的解释折进结果行尾注（`｜pnpm：…`），说明性长文交给文档——直接回应「去掉多余无关的说明」。
+- **不制造新假告警**：`未声明 dsh.bundle` 不判失败也不告警（`dsh-study-buddy` 由预设挂载是合法形态）；「未见引用」仅对插件形状的包做 ⚠；
+  降级路径（无 PyYAML / 无 `hoistedLocations`）只 ⚠；doctor 的 peer 指引为信息行（`—`）。
+- **不给 pnpm 加 `--fetch-retries`**：探测失败已被吞掉，多 retry 只增加耗时；也不替用户改网络/代理，只给判别命令与建议。
+- **不做额外 pnpm 调用**（不跑 `pnpm list`）：校验全部读文件，离线、快、可复现。
+
+### 5. 验证情况
+
+| 项 | 命令/方法 | 结果 |
+|---|---|---|
+| 编译 | `python -m py_compile`（全量） | 通过 |
+| 入口冒烟 | `python vdsh_launcher.py --help` | 通过 |
+| profile 校验 11 组用例 | 临时脚本（临时目录造最小 profile） | 全部通过：registry 版本变化、**git commit 变化但版本号相同**、未激活→✗、磁盘与 lockfile 不一致→✗、预设挂载不误报、缺失→✗、无引用→仅 ⚠、降级只告警、added/removed、scoped/含 `@` 的键解析 |
+| 动画折叠 5 组用例 | 假 TTY 流 + `python -u` 子进程 | 全部通过：噪声零输出、转轮文案更新、真行保留、失败补打折叠行、非 TTY 全量、无 `quiet` 回调时行为不变、无 pnpm 运行标记时结论行如实说明「更新可能未真正执行」 |
+| doctor | `python vdsh_launcher.py doctor`（不接管道） | 退出码 0；输出 5 个插件的 版本/commit + 生效方式（4 个 profile 层 · 1 个预设挂载）+ peer 指引 |
+| 真机 E2E | `vdsh update plugin`（需先停 dsh web） | **未执行**（本会话的 GUI 就是该实例，见 §6） |
+
+真实 profile 只读校验输出：`@liustack/modlens 3.26.1`、`dsh-at-file 0.7.0@da602d1`、`dsh-better-sidebar 0.18.1`、
+`dsh-study-buddy 0.9.1@3836f27（预设挂载）`、`dsh-task-notify 1.6.1@e4b3994`，无硬失败。
+
+### 6. 遗留与后续迭代提示
+
+- **真机 `vdsh update plugin` 复跑未做**：需停 dsh web。建议在真终端跑一次并复跑第二次（幂等），确认「一行结论 + 尾注」与转轮进度符合预期。
+- 断网/代理缺失时 `update plugin` 的耗时仍来自 pnpm 探测重试（约 10–20s）；若长期如此，考虑在 vdsh 侧给 `dsh plugin` 传 pnpm 网络参数（本轮故意未做）。
+- `build.py` 的 `pnpm run build` 未接 `quiet`（可能同样打 peer 提示）；如需一致体验，可后续把 `_PnpmNoise` 复用过去。
+- 副机是否同样阻断 `github.com:443` 未验证（本机实测为主）；若副机正常，lockfile 可能被改写为 codeload 解析，注意 `vdsh sync push` 的先后。
+
+### 7. 复测清单（回归用）
+
+```powershell
+cd T:\Open-Source\dsh-launcher
+python -m py_compile (Get-ChildItem -Recurse -File -Include *.py -Path .\vdsh).FullName
+python vdsh_launcher.py --help
+python vdsh_launcher.py doctor          # 不接管道；echo $LASTEXITCODE 应为 0
+python "$env:TEMP\vdsh_profile_state_check.py"   # 11 组校验用例（临时脚本，见 §5）
+python "$env:TEMP\vdsh_spinner_check.py"         # 4 组折叠/补打/透传用例
+# 真机（先停 dsh web）：
+vdsh update plugin
+```
+
+---
+
 ## 2026-09-08（同日第三波 · 收尾）：聊天记录跨机同步不成立 —— 功能搁置
 
 ### 1. 背景与结论

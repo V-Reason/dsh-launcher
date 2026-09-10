@@ -43,6 +43,11 @@ def die(message, code=EXIT_ERROR):
     sys.exit(code)
 
 
+def fail(message):
+    """非致命失败行（✗）写 stderr，继续执行：用于一次报告多条校验失败。"""
+    print("vdsh ✗ %s" % message, file=sys.stderr)
+
+
 def ask(prompt, default=None):
     """交互询问一行；空输入返回 default；EOF 返回 None（无默认时亦返回 None）。"""
     try:

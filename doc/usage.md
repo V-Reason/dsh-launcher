@@ -56,6 +56,7 @@ vdsh help / -h / --help          用法
 | `launcher.auto_pull` | false | true = 每次启动前自动拉取 DSH 数据（等同每次加 `--sync`） |
 | `animation.fps` | 8 | TTY 动画帧率（1-60） |
 | `animation.frames` | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | 动画帧序列 |
+| `animation.quiet` | true | true = TTY 下折叠子进程（pnpm）的低价值行（进度/重试/统计），进度改显示在转轮上；false = 全量输出（排障用）；非 TTY 恒为全量 |
 | `sync.data_dir` | （空） | DSH 数据目录；支持 `~` 展开（如 `~/.dsh`）；空 = `DSH_HOME` → `~/.dsh` |
 | `sync.remote` | （空） | 默认远端；`vdsh sync init <URL>`（成功时）与 `remote set` 都会写入此处，无参 `vdsh sync init` 时使用 |
 | `sync.allowlist` | 9 项列表 | 同步范围（相对数据目录）；含用户预设 `.agent-presets/` 与全局配置层 `cordis.patch.yml`，不存在自动跳过 |
@@ -113,7 +114,46 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
 - 两者在 **dsh web 运行中**都会询问（`[y/N]`，非交互/EOF 默认中止）：Windows 下运行中的服务会锁定文件，且更新的版本需要重启才生效。
 - `update dsh`：仓库有未提交改动也会询问确认；动作顺序为 fetch → merge（本地有提交时常规合并，冲突中止并提示）→ `pnpm install` → `pnpm run build`，全程带动画，结束显示新旧版本号。
 - `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后提示重启 dsh web，并提醒 `vdsh sync push` 把新的 `package.json`/`pnpm-lock.yaml` 同步给副机。
+- **更新后校验（结论可信）**：`update plugin` 结束会给出**一行结论**，形如
+  `插件已确认为最新：5 个依赖的解析与 lockfile、磁盘三方一致；生效方式：profile 层 4 · 预设挂载 1`。
+  判定用三重证据：`package.json` 声明 ↔ `pnpm-lock.yaml` 记录 ↔ 磁盘 `node_modules/.modules.yaml` 的解析身份；
+  **git 依赖比 commit（版本号没变但 commit 变了也判为已更新）**，不再只看已装包的版本号。生效方式四态：
+  `profile 层`（声明 `dsh.bundle.patch` 且已在 `dsh.profile.bundles`）/ `预设挂载`（未声明 bundle，但被预设或补丁层引用，
+  如 `dsh-study-buddy` 由 `~/.dsh/.agent-presets/study` 挂载）/ `普通依赖`（未见引用，仅作库）/ `未激活`（声明了 bundle 却没进 bundles → **不会生效**）。
+  校验不通过（依赖缺失、未激活、磁盘与 lockfile 不一致）会逐条 `vdsh ✗` 并以退出码 1 结束；降级情形（缺 PyYAML、
+  无 `hoistedLocations`）只 `vdsh ⚠`，不误判。若 `dsh plugin` 退出码为 0 却完全没有 pnpm 的运行标记，结论行会附
+  `未见 pnpm 运行标记（更新可能未真正执行…）`——此时「确认为最新」只说明状态没变，请用 `vdsh doctor` 复核。
+  `vdsh doctor` 的「profile 插件」段输出同一套信息（每插件 版本/commit + 生效方式）。
 - `vdsh doctor` 可体检已安装插件与 DSH 版本是否适配。
+
+### 输出里的 `[WARN]` 怎么看
+
+`[WARN]` 前缀是 **pnpm 自己打印的**；vdsh 自己的输出一律带 `vdsh ·` / `vdsh ⚠` / `vdsh ✗`。两类常见 `[WARN]` 都属预期，更新已成功：
+
+- `[WARN] HEAD https://github.com/<owner>/<repo> error (ECONNRESET|ETIMEDOUT). Will retry in … retries left.`
+  —— pnpm 在解析 `github:` 依赖时探测「仓库是否公开」（`HEAD https://github.com/x/y`）失败。该探测失败被 pnpm 吞掉，
+  只会让它改用 git 解析（比 codeload tarball 慢），**不影响结果**；重试退避 500ms→1s 也与 pnpm 默认 `fetch-retries: 2` 一致。
+- `[WARN] Issues with peer dependencies found. Run "pnpm peers check" to list them.`
+  —— profile 的 peer 缺项是 DSH 的设计（dsh 生成的 `profiles/<p>/pnpm-workspace.yaml` 为 `nodeLinker: hoisted` +
+  `autoInstallPeers: false`），这些 peer（`@deepseek-ai/*`、`react` 等）由 Harness 安装层 `$DSH_HOME/profiles/node_modules` 提供，
+  不装进 profile 才对（否则会出现重复的 cordis 实例）。看明细：`cd $env:DSH_HOME\profiles\web; pnpm peers check`。
+
+想逐行看全量输出：`animation.quiet: false`（或把输出重定向到文件，非 TTY 恒为全量）。命令真失败时，被折叠的行会原样补打，不会丢排查信息。
+
+### `github.com:443` 不可达怎么办
+
+本机实测（2026-09）只有 `github.com:443` 被阻断，`github.com:22`/`codeload.github.com:443`/`registry.npmjs.org:443` 均正常——
+这正是上面 HEAD 重试的来源。判别：
+
+```powershell
+Test-NetConnection github.com -Port 443        # False = 被阻断
+Test-NetConnection codeload.github.com -Port 443
+node -e "fetch('https://github.com/omdsh-dev/dsh-at-file',{method:'HEAD'}).then(r=>console.log(r.status)).catch(e=>console.log(e.cause?.code||e.name))"
+```
+
+- 不处理也能用：git 依赖会走 SSH 解析（`pnpm-lock.yaml` 里记为 `git+ssh://git@github.com/…#<sha>`），更新照常成功，代价是每次多花十几秒。
+- 想消除：给 pnpm 配代理（`$env:HTTPS_PROXY='http://127.0.0.1:端口'` 或 `pnpm config set https-proxy …`），git 需要时再配 `git config --global http.proxy`。
+- 放行后首次 `update` 可能把这几个 git 依赖的 lockfile 解析从 `git+ssh` 改写为 codeload tarball（正常），记得 `vdsh sync push` 同步给副机。
 
 ## 退出码（launcher）
 

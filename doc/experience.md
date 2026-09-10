@@ -156,6 +156,62 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 
 **解决**：改用 **Host 围栏探测**（`tailnet_is_trusted`）：用请求头 `Host: <域名>` 打 `/api/<任意端点>`，围栏在认证与端点分发**之前**生效，因此无需 cookie —— 实测「已信任 → 401/404，未信任 → 403」（`packages/client/connection/src/api-request-trust.ts`：Host 既非 loopback 也不在 `trustedHosts` → 403）。**只有明确 403 才告警**，探测失败/未知一律静默（宁缺勿假）。探测用「传给 `--trusted-host` 的同一个字符串」，与启动参数同源。
 
+### 7.4 `vdsh update plugin` 的 `[WARN]` 是伪报吗？（2026-09-10，源码 + 实测确认）
+
+**现象**：更新时逐行打印
+`[WARN] HEAD https://github.com/<owner>/<repo> error (ECONNRESET|ETIMEDOUT). Will retry in 500 milliseconds. 2 retries left.`（每个 git 依赖 2 条，退避 500ms→1s）
+以及 `[WARN] Issues with peer dependencies found. Run "pnpm peers check" to list them.`，最后仍然成功（`插件已是最新`、退出码 0），让人怀疑是不是被吞掉的错误。
+
+**结论**：两类都是 pnpm 自己打印的**非致命**提示（不是 vdsh 的输出——vdsh 只用 `vdsh ·`/`vdsh ⚠`/`vdsh ✗`），且**底层网络条件是真的**：本机 `github.com:443` 被阻断。
+
+**根因（pnpm 11.21 源码，`…\AppData\Roaming\npm\node_modules\pnpm\dist\pnpm.mjs`）**：
+
+1. HEAD 只有一处来源——`isRepoPublic()`（解析 `github:` 依赖时判断仓库是否公开）：
+   `fetchWithDispatcher(httpsUrl.replace(/\.git$/,''), {method:'HEAD', redirect:'manual', retry:{retries:2, factor:2, minTimeout:500, maxTimeout:2000}})`，
+   失败被 `catch { return false }` **吞掉**；它只决定走 codeload tarball 还是 git 解析（`tarball: repoIsPublic ? hosted.tarball : void 0`），
+   重试次数与退避和日志逐字吻合（pnpm 默认 `fetch-retries: 2`）。
+2. 打印者是 `reportRequestRetry` → `formatWarn()`（即 `[WARN] …`），纯提示。
+3. peer 提示出自 `formatWarn('Issues with peer dependencies found…')`；缺 peer 是 **DSH 的设计**：`packages/boot/app-boot/src/profile.ts`
+   的 `PROFILE_PNPM_WORKSPACE` 给每个 profile 写 `nodeLinker: hoisted` + `autoInstallPeers: false`，注释写明「missing peers … fall through to the
+   healed profiles/node_modules installation fallback」——保证所有插件共用安装层那一份 cordis，而不是各装一份。
+   `pnpm peers check` 实测 16 项缺 peer（`dsh-better-sidebar` 的 14 个 `@deepseek-ai/*` + `react-icons` 的 `react`/`react-dom`），
+   全部在 `$DSH_HOME/profiles/node_modules/{@deepseek-ai/*,react,react-dom}` 里有链接 → 运行时解析得到。
+4. `Packages: -2`（含下面的 `--` 条）也不是错误：pnpm `statsForCurrentPackage` 的安装统计行，表示本次从 `node_modules` 清掉 2 个过期条目；
+   当时 `package.json`/`pnpm-lock.yaml` 未被改写，5/5 声明依赖均在位。
+
+**实测（2026-09-10）**：`github.com:443` TCP **FAIL**；`github.com:22`、`codeload.github.com:443`（GET 200/572ms）、`api.github.com:443`、
+`ssh.github.com:443`、`registry.npmjs.org:443`（200/295ms）全部 OPEN；node `fetch(..., {method:'HEAD'})` 打三个仓库 URL 全部 TimeoutError；
+`git ls-remote https://github.com/…` 21s 后 `Could not connect to server`，而 `git@github.com:…`（SSH）4.3s 成功并返回 lockfile 记录的 commit。
+
+**影响与边界**：正确性不受影响（探测失败 → 回退 git/SSH 解析，lockfile 因此记为 `git+ssh://…#<sha>`）；代价是每次更新多十几秒 + 吓人的 WARN。
+彻底消除靠用户侧放行或配 `HTTPS_PROXY`（`no_proxy`/`https-proxy` 亦受支持，见 pnpm 的 `EnvHttpProxyAgent`）；vdsh 侧只做「让输出自解释」，不改 pnpm 行为。
+
+**复现**：`Test-NetConnection github.com -Port 443`（False）+ `Test-NetConnection codeload.github.com -Port 443`（True）足以定性。
+
+### 7.5 git 依赖「版本号没变 = 没更新」是假阴性（2026-09-10 修复）
+
+**现象**：旧 `_update_plugin` 用 `node_modules/<name>/package.json` 的 `version` 比较前后差异。对 `github:` 规格的依赖，
+上游推了新 commit 但没升 `version` 时，会打印「插件已是最新（无版本变化）」——**实际已经换了代码**，用户完全看不出来。
+
+**根因**：git 依赖的「装的是哪个版本」不由 `version` 字段决定，而由 commit 决定；lockfile（`importers['.'].dependencies[name].version`）与磁盘都不在 `version` 字段里体现 commit。
+
+**解决（`vdsh/profile_state.py`，三重证据）**：
+
+1. `package.json` 的 `dependencies`/`dsh.profile.bundles`；
+2. `pnpm-lock.yaml` 的 `importers['.'].dependencies`（PyYAML 缺失时降级跳过，不报错）；
+3. **磁盘解析身份**：`node_modules/.modules.yaml` 的 `hoistedLocations` 键 `<name>@<version>` 或 `<name>@git+ssh://…#<commit>`（`nodeLinker: hoisted` 下的权威记录）。
+   比较用 `identity()`：git → `('git', commit)`，其余 → `('semver', 版本)`；展示用 `0.7.0@da602d1` 这种形式。
+   两者**同类才比对**，否则（降级路径）跳过——避免拿 semver 去比 git 造成假失败。
+
+**同时暴露的第二个坑**：装 ≠ 生效。判生效方式四态（`profile 层` / `预设挂载` / `普通依赖` / `未激活`）。
+实例：`dsh-study-buddy` 的 `package.json` **没有** `dsh.bundle`，因此 `dsh plugin` 的 `reconcilePlugins()` 不会把它加进 `dsh.profile.bundles`——
+但它自带 `cordis.patch.yml` 并由用户预设 `~/.dsh/.agent-presets/study/agent.cordis.yml` 的 `name: dsh-study-buddy` 行挂载，属**正常**形态。
+若把它误报成告警，就重演了「假告警」的老毛病；因此「未见引用」只做 ⚠ 且限定在插件形状的包（名字 `dsh-` 前缀或自带补丁文件），
+扫描引用时**排除包自己的补丁文件**（否则任何自带 `cordis.patch.yml` 的插件都会自我证明被使用）。
+
+**判定键解析**：`hoistedLocations` 的键不能用 `rsplit('@')`——`dsh-at-file@git+ssh://git@github.com/x.git#sha` 里还有 `@`。
+规则：名字以 `@` 开头（scoped）时取首个 `/` 之后的第一个 `@`，否则取首个 `@`。
+
 ## 8. 跨机路径与启动失败检测（2026-09）
 
 ### 8.1 硬编码绝对路径：跨机复制 launcher 的「必挂点」

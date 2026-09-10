@@ -32,6 +32,7 @@ def _load_config():
     spinner.configure(
         fps=settings["animation"]["fps"],
         frames=settings["animation"]["frames"],
+        quiet=settings["animation"]["quiet"],
     )
     return settings, warnings
 

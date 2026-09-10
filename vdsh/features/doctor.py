@@ -4,13 +4,13 @@
 任何 ✗ 项 → 退出码 1；仅 ⚠ 提示 → 退出码 0。
 """
 
-import json
 import os
 import shutil
 
+from .. import profile_state
 from .. import settings as settings_mod
 from ..config import CLI_REL, DIST_REL, PORT, URL
-from ..console import die, say
+from ..console import die
 
 NAME = "doctor"
 SUMMARY = "环境自检：仓库/依赖/端口/配置（只读）"
@@ -36,14 +36,6 @@ def _removed_export_hit(lib_index):
     except OSError:
         return False
     return "settingsNamespace" in text and "@deepseek-ai/dsh-settings" in text
-
-
-def _installed_version(installed_dir):
-    try:
-        with open(os.path.join(installed_dir, "package.json"), "r", encoding="utf-8") as handle:
-            return json.load(handle).get("version", "?")
-    except (OSError, ValueError):
-        return "?"
 
 
 def run(argv, settings):
@@ -100,31 +92,33 @@ def run(argv, settings):
 
     print("profile 插件:")
     profile_dir = os.path.join(data_dir, "profiles", "web")
-    pkg_path = os.path.join(profile_dir, "package.json")
-    if os.path.isfile(pkg_path):
-        try:
-            with open(pkg_path, "r", encoding="utf-8") as handle:
-                manifest = json.load(handle)
-            deps = sorted((manifest.get("dependencies") or {}).keys())
-        except (OSError, ValueError) as error:
-            deps = []
-            print("  ⚠ 无法读取 %s（%s）" % (pkg_path, error))
-        if not deps:
-            _check("插件依赖", True, "无组件依赖（纯平台默认）")
-        for name in deps:
-            installed = os.path.join(profile_dir, "node_modules", name)
-            if not os.path.isdir(installed):
-                failed |= not _check("插件 %s 已安装" % name, False,
-                                     "缺失：cd ~/.dsh/profiles/web; pnpm install")
-                continue
-            if _removed_export_hit(os.path.join(installed, "lib", "index.js")):
+    state = profile_state.verify(profile_dir, data_dir=data_dir, repo=repo)
+    if not state["present"]:
+        print("  — profile 未初始化（首次运行 DSH 或 vdsh sync init 后生成）")
+    elif not state["plugins"]:
+        _check("插件依赖", True, "无组件依赖（纯平台默认）")
+    else:
+        for plugin in state["plugins"]:
+            name = plugin["name"]
+            if not plugin["installed"]:
+                continue  # 缺失由下方 failures 统一给出（含修复命令）
+            installed_dir = os.path.join(profile_dir, "node_modules", name)
+            if _removed_export_hit(os.path.join(installed_dir, "lib", "index.js")):
                 failed |= not _check(
                     "插件 %s 已适配 DSH 平台" % name, False,
                     "仍导入已移除的 settingsNamespace：按 dsh-plugin-migration-guide 适配后重装")
-            else:
-                _check("插件 %s 已安装（%s）" % (name, _installed_version(installed)), True)
-    else:
-        print("  — profile 未初始化（首次运行 DSH 或 vdsh sync init 后生成）")
+                continue
+            # 版本/commit 取磁盘解析身份（git 依赖看 commit），并标出生效方式：
+            # profile 层 = 声明 dsh.bundle 且已激活；预设挂载/普通依赖 = 非 profile 层。
+            _check("插件 %s（%s · %s）" % (name, plugin["display"], plugin["activation"]), True)
+        for text in state["failures"]:
+            failed = True
+            print("  ✗ %s" % text)
+        for text in state["warnings"]:
+            print("  ⚠ %s" % text)
+        if state["peer_hint"]:
+            print("  — pnpm 的 peer 提示属 profile 设计预期（peer 由 Harness 安装层 "
+                  "profiles/node_modules 提供）；明细：cd %s; pnpm peers check" % profile_dir)
 
     print()
     if failed:
