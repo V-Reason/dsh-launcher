@@ -43,6 +43,13 @@ CLI_REL = str(Path("apps", "cli", "lib", "bin.js"))
 DIST_REL = str(Path("apps", "web", "dist", "index.html"))
 SRC_DIRS = (str(Path("apps", "cli", "src")), str(Path("apps", "web", "src")))
 
+# 构建子进程的完整输出落盘处（固定路径，方便失败时直接复制去查）：构建成功即删除，
+# 失败保留并在 `vdsh ✗` 文案里给出该路径（改前 4000+ 行构建输出只喂给折叠器，失败时无处可查）。
+BUILD_LOG_PATH = Path(tempfile.gettempdir()) / "vdsh-build.log"
+
+# 失败时复述的构建输出行数（末尾若干行：构建工具的报错都在尾部）。
+BUILD_TAIL_LINES = 15
+
 BUILD_PROMPT = "检测构建产物缺失/源码更新，执行build? [Y/n] "
 
 # ── 就绪轮询预算（插件较多时启动可能超过 1 分钟） ───────────────────────────
@@ -79,9 +86,9 @@ def sync_host():
 
 # ── 启动器自身退出码 ───────────────────────────────────────────────────────
 EXIT_OK = 0
-EXIT_ERROR = 1
+EXIT_ERROR = 1        # 运行期硬失败（更新流程失败、插件校验不通过等）
 EXIT_USAGE = 2        # 参数/环境错误（repo 缺失、未知参数、目录不存在）
-EXIT_BUILD = 3        # 构建失败或 pnpm 缺失
-EXIT_DEPS = 4         # Python 依赖缺失（requests）
+EXIT_BUILD = 3        # 构建失败（pnpm run build 非 0 退出）
+EXIT_DEPS = 4         # 依赖缺失（requests / pyyaml / node / pnpm）
 EXIT_NO_PWSH = 5      # pwsh（PowerShell 7）缺失
 EXIT_PORT_BUSY = 6    # 端口被占用但未识别为 Harness

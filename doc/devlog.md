@@ -6,7 +6,83 @@
 
 ---
 
-## 2026-09-10（同日第二波）：全体命令输出对齐同一标准（特殊项特殊处理）
+## 2026-09-10（第三波）：`vdsh update dsh` 构建失败「无证据」修复
+
+### 1. 背景
+
+用户跑 `vdsh update dsh`：**能正确拉取远端数据**，但**构建时报错**；随后在 dsh 根目录手动
+`pnpm install && pnpm run build` 正常，于是怀疑是误报或执行逻辑有问题。
+
+### 2. 排查结论（先定性，再改码）
+
+| 取证 | 方法 | 结果 |
+|---|---|---|
+| 调用链是否可用 | 用 vdsh 自己的 `run_child_progress` 跑**真实** `pnpm run build`（cwd = 真实仓库，`quiet=Noise()`） | **exit=0**、25.7s、4084 行（`build: recorded 234 client artifact(s)`）→ 调用链与折叠机制无问题 |
+| 同上，`pnpm install` | 同执行器 | exit=0、506ms、`Done in …` 正确折叠、`noise.observed=True` |
+| 失败发生在哪一步 | `git reflog` + `pnpm-lock.yaml`/`.modules.yaml`/构建产物 mtime | merge @14:34:47 → lockfile 写入 @14:35:54（**install 成功**）→ 产物 @14:39（用户手动构建）→ **只有 build 那一次没过** |
+| 环境是否同构 | `pnpm config get engine-strict`、`.npmrc`、Node/pnpm 版本 | 未设置、无、Node 24.15 + pnpm 11.7.0（`packageManager` 钉住）→ 手动与 launcher 无可见差异 |
+
+**结论**：真实失败原因**不可复原**——改前构建的 4000+ 行输出只喂给折叠器，失败时只打
+`构建失败（exit code N），请手动检查`：没有 tail、没有日志、没有阶段说明，**真失败与误报在终端上不可区分**。
+这类「无证据失败」就是缺陷本身（详见 `experience.md` §9.1）。
+
+顺带查出同一路径上会把「环境问题」伪装成「构建失败」的三处：命令起不来抛 traceback、
+pnpm 缺失错报 `EXIT_BUILD(3)`、快进失败只会说「请检查冲突」；
+以及两个子进程坑：`proc.stdout.close()` 会在读线程持锁时把函数挂死、
+`for line in proc.stdout` 只在 EOF 结束（后代抱住写端即永久挂住）。
+
+### 3. 改动清单
+
+1. **`vdsh/spinner.py`**：`run_child_progress` 新增 `tail_out`（含**被折叠行**的完整行序，供失败复述；传了它就由调用方负责呈现，本函数不再补打折叠行——避免同一批行出现两次）；
+   读循环改为「读线程 + 队列」，**收尾判据是「进程已退出（`proc.poll()`）就取走队列已有行」，不是等 EOF**（本机实测管道 EOF 与进程退出无时序保证，读线程会一直卡在 `readline()`）；
+   另有 `reader_done + 未完成任务数` 快路径与 `STALL_SECONDS=600`（进程仍在跑但零输出）兜底；
+   `Popen` 失败返回新增的 `EXIT_SPAWN_FAILED=127` 并打 `vdsh ⚠ 无法启动命令（…）`（不再抛 traceback）；
+   收尾新增 `_release_stream()`——读线程 `join(2s)` 后才 close，未退出就不 close（**这正是「有卡死检测却仍然挂住」的真因**）；
+   折叠行补打改走 stderr（stdout 被重定向也可见）。
+2. **`vdsh/config.py`**：新增 `BUILD_LOG_PATH`（`%TEMP%\vdsh-build.log`）、`BUILD_TAIL_LINES=15`；退出码注释与 usage 对齐（3=构建失败、4=依赖缺失含 node/pnpm）。
+3. **`vdsh/features/build.py`**：`run_build(repo, pnpm=None, code_is_new=False)`——`collect` 收全量（**不用 `tail_out`**：让 `run_child_progress` 补打折叠行，自己只复述末尾）→ 失败时补打**末尾 15 行** + 落盘完整日志 + 点明「仓库代码已更新、仅构建未完成」（`code_is_new` 由 update 段传入，`vdsh build` 不会误用该句）；成功即删日志（只留最近一次失败现场）；缺 pnpm / 起不来归 `EXIT_DEPS(4)`。
+4. **`vdsh/features/update.py`**：新增 `_git_stdout`（只取 stdout）用于**脏工作区判定**与分支名解析；上游名加形状校验 `_valid_upstream`（两段、无空白/控制字符，**刻意不限制非 ASCII**——git 允许中文分支名，ASCII 白名单会把合法仓库判成「未配置上游」）；快进失败且本地无领先提交时改指向「上游被 force push」+ `git log HEAD..<upstream>` / `git reset --hard <upstream>` 两条路；未提交改动的确认文案补「合并可能失败或覆盖本地改动」。
+5. **文档**：`usage.md`（`update dsh` 失败时看什么 + 退出码表拆清）、`dev.md`（职责表两行 + §3 新增「失败诊断最低要求」+ §5 新增第 7 项测试）、`experience.md` §9（新增「子进程与失败诊断」主题：无证据失败、两个子进程坑、git 判定）、本条目。
+
+### 4. 关键决策与取舍
+
+- **不假装知道根因**：真实失败已不可复原，本轮只做「让下一次失败可诊断」，并在文档里写明取证边界——比编一个解释更有价值。
+- **失败诊断不受输出简约约束**（沿用既有例外条款）：末尾 15 行 + 日志路径 + 阶段说明进输出；成功路径形态一字不改。
+- **不做自动重试/自动回滚**：对 25s+ 的构建自动重试会掩盖真问题；把证据交给人，恢复动作写进文案。
+- **日志落 `%TEMP%` 固定路径、成功即删**：失败现场可复制粘贴去查，成功路径不给 `%TEMP%` 堆垃圾。
+- **`STALL_SECONDS=600` 只在「完全无输出」时触发**：正常构建每几秒必有输出，不会误杀。
+- **`tail_out` 不做长度限制**：调用方决定截断；构建日志是权威来源，内存成本可忽略。
+
+### 5. 验证情况
+
+| 项 | 命令/方法 | 结果 |
+|---|---|---|
+| 编译 | `python -m py_compile`（涉及 4 个模块）+ `python vdsh_launcher.py --help` | 通过 |
+| 分流/动画回归（扩展为 10 组） | `%TEMP%\vdsh_spinner_check.py` | 全部通过（原 5 组不变；新增 `tail_out` 完整性、**后代抱写端时按「进程已退出」立即收尾**（<15s，修复前 60.1s）、**进程仍在跑且零输出时 STALL 有界终止**、**瞬退子进程 5 次往返不丢行**、命令不存在返回 127 且无 traceback） |
+| `update dsh` 判定与诊断（新增） | `%TEMP%\vdsh_update_dsh_check.py`（离线：stub pnpm + 临时 git 仓库） | 全部通过：失败诊断（末尾输出/日志落盘/`code_is_new` 文案/退出码 3）、`vdsh build` 不误宣称、成功清理日志、命令缺失退 4、`_git_stdout` 只取 stdout、上游名形状校验（接受 `origin/master` 与 `origin/中文分支`，拒绝警告文本/空/控制字符）、上游名不合法退 2、三条判定（已是最新/有更新/快进失败） |
+| profile 校验回归 | `%TEMP%\vdsh_profile_state_check.py` | 全部通过（未受影响） |
+| 插件输出预览回归 | `%TEMP%\vdsh_output_preview.py` | 退出码 0、输出形态不变（未受影响） |
+| 三条命令输出预览 | `%TEMP%\vdsh_standard_preview.py`（新增 build 失败段） | 成功/失败/update/launch 形态符合约定：失败段为「真输出 → 折叠行补打 → 末尾 15 行 → 日志路径 → 阶段说明 → `vdsh ✗`」 |
+| 真机构建（新读循环 + 日志清理） | `python vdsh_launcher.py build`（真实仓库，29.0s） | 退出码 0、`vdsh ✓ 构建完成`、`%TEMP%\vdsh-build.log` 已清理 |
+| 真机只读复测 | `%TEMP%\vdsh_update_live_check.py`（跳过运行中询问，其余真跑） | `vdsh ✓ dsh 已是最新（0.1.5-rc.1）`，退出码 0 |
+| 真机 `vdsh update dsh` | 本会话 GUI 正跑在该实例上（`auth`），非交互下按设计中止 | 行为符合预期（停止服务后可作为下一次真机验证） |
+| 未执行 | 失败构建的**真机**复现（需真有远端更新 + 构建真的失败） | 见 §6 |
+
+### 6. 遗留与后续迭代提示
+
+- **下一次真机失败即验收**：等真有远端更新时跑一次 `vdsh update dsh`；若构建又失败，终端应给出
+  末尾 15 行 + `%TEMP%\vdsh-build.log` 路径——把那段输出贴回来即可定位真实根因（这是本轮无法完成的一步）。
+- `STALL_SECONDS`（600s）尚无真机样本；若遇到原生编译等长静默阶段被误杀，调大该常量即可。
+  （注意它现在只兜「进程仍在跑但零输出」；「直系子进程已退出、后代抱句柄」已由 `proc.poll()` 判据立即收尾。）
+- `spinner.say()` 非 TTY 分支仍是裸 `print`（非 TTY 下即「原样透传」，不套前缀）；若要彻底统一可后续走 `console.say`。
+- `_release_stream` 在极端情况下会放弃 close（留一个 daemon 线程）；这是「宁可有界返回，不要挂死」的取舍，未再优化。
+- **本轮最大的返工点**：最初按「等 EOF + 哨兵行」实现收尾，先撞上「哨兵排在未取走的行前面 → 瞬退进程丢输出」，
+  改成「`reader_done` + 未完成任务数」后又撞上「读线程等不到 EOF → 主循环永久 `get()`」，
+  最终才落到「进程已退出即取走队列已有行」。**结论：进程退出是权威信号，流关闭不是**（见 experience.md §9.2）。
+
+---
+
+## 2026-09-10（第一波）：输出标准统一（全体命令对齐同一套元素）
 
 ### 1. 背景
 

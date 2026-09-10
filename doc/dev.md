@@ -19,15 +19,16 @@
 | `vdsh/app.py` | 分发器、首启接线 | 新功能在注册表加行，不在此堆逻辑 |
 | `vdsh/settings.py` | vdsh.yaml 全部语义 | **TEMPLATE 与 DEFAULTS/VALIDATORS 需同步改**；模板是 raw 字符串，首行不能以 `\` 开头 |
 | `vdsh/config.py` | 常量 | 退出码新增在此 |
+| `vdsh/config.py` | 常量 | 退出码新增在此；**构建日志路径 `BUILD_LOG_PATH`（`%TEMP%\vdsh-build.log`）与 `BUILD_TAIL_LINES` 也在此** |
 | `vdsh/bootstrap.py` | 向导 | 与 `features/setup.py` 共用；提问接受逻辑在此 |
-| `vdsh/spinner.py` | 动画/子进程 | `configure()` 在 app 启动时设置全局（含 `animation.quiet`）；`run_child_progress(collect=, quiet=, replay_on_failure=)` 是「子进程输出分流」的唯一入口：quiet 的三个去向 = 原样打印 / 静默折叠 / 归一化进度行 `→ …`（打印后把转轮文案复位为任务名）；折叠只针对成功路径，失败必补打，非 TTY 恒全量；新增超时/参数导出注意线程安全（见 experience.md） |
+| `vdsh/spinner.py` | 动画/子进程 | `configure()` 在 app 启动时设置全局（含 `animation.quiet`）；`run_child_progress(collect=, quiet=, tail_out=, replay_on_failure=)` 是「子进程输出分流」的唯一入口：quiet 的三个去向 = 原样打印 / 静默折叠 / 归一化进度行 `→ …`（打印后把转轮文案复位为任务名），`tail_out` 额外收集**含折叠行**的完整行序（失败复述用，传了它就由调用方负责呈现、本函数不再补打折叠行）；折叠只针对成功路径，失败必补打（走 stderr），非 TTY 恒全量；**读循环由独立线程 + 队列驱动，收尾判据是「进程已退出（`proc.poll()`）就取走队列已有行」，不是等 EOF**（管道 EOF 与进程退出无时序保证，等 EOF 会永久挂住）、另有 `reader_done + 未完成任务数` 快路径与 `STALL_SECONDS`（600s 零输出）兜底；`_release_stream` 读线程 `join(2s)` 未退出就不 close（避免 close 卡死在缓冲区锁上）；命令起不来返回 `EXIT_SPAWN_FAILED(127)` 而非抛 traceback；新增超时/参数导出注意线程安全（见 experience.md §9） |
 | `vdsh/console.py` | 输出标准的唯一出口 | `step`（节点）/`ok`（✓）/`fail`（✗ 不退出）/`die`（✗ 退出）/`warn`（⚠）/`progress`（`→`）；**新代码不要裸 print 或手写前缀**；输出形态约定见 dev.md §3 |
 | `vdsh/pnpm_log.py` | pnpm 输出分流 | 纯标准库；`Noise()` 作 `quiet` 回调，把 pnpm 的统计/重试/回执行折叠成 `→` 进度行（按种类节流）；`has_network_failure()` 给失败文案指路；规则变更须同步 dev.md §5 的分流用例 |
 | `vdsh/profile_state.py` | profile 插件状态校验 | 纯标准库（PyYAML 仅用于 lockfile 交叉校验，缺失降级）；三重证据 = `package.json` ↔ `pnpm-lock.yaml` ↔ `node_modules/.modules.yaml` 的 `hoistedLocations`；git 依赖比 commit；生效方式四态；`hoistedLocations` 键不可用 rsplit 拆（见 experience.md §7.5） |
 | `vdsh/module_fallback.py` | 模块回退目录自愈 | 纯标准库；判定必须与 app-boot `ensureSymlink` 对齐（链接/proxy 保留，其余删除）；launch 与 dsh_cli 双通道调用；data_dir 缺省 `~/.dsh` |
 | `vdsh/features/sync.py` | 同步桥 | 退出码透传语义 0-4 不能变；`init` 无参（TTY）= 配置向导（repo/data_dir/remote 校验并写 vdsh.yaml）；同步脚本是 `dsh-data-git-sync/sync-dsh.ps1` |
 | `dsh_cli.py` | 官方 CLI 转发壳（dsh.cmd 调用） | 纯标准库；按 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES` 解析并转发 node；不写配置 |
-| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例 |
+| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例；**「有/无内容」类 git 判定必须用 `_git_stdout`（只取 stdout）——`_git_quiet` 合并了 stderr，git 的警告会变成「干净仓库凭空有改动」的误判**；构建段传 `code_is_new=True`（失败文案才敢说「代码已更新」） |
 | `dsh-data-git-sync/sync-dsh.ps1` | 同步本体 | **UTF-8 BOM 文件**；任何编辑器保存可能去 BOM（PS 5.1 会按 GBK 误读 → 全文件报错）；`BuiltinIgnoreRules` 里的路径是同步卫生红线（junction 展开入库的坑，见 experience.md §8.5），新排除项进这里而非 `gitignore_extra` |
 
 ## 2. 新增一个功能（5 步）
@@ -68,6 +69,10 @@ FEATURES = {..., "agent": (agent.NAME, agent.SUMMARY, agent.run)}
   **解释性长文不进输出**（归 `doc/` 与 `vdsh doctor`）；失败诊断（exit code、下一步命令、被折叠行补打）不受此限。
   **例外**：报告类（`config`/`doctor`/`sync status`）用各自报告格式；向导类（提问/缩进提示）保留人机对话形态；
   `sync-dsh.ps1` 可脱离 vdsh 独立运行，保留自有文案（符号体系同为一套 `→/✓/⚠/✗`）。详见 usage.md「输出约定与常见告警」。
+- **失败诊断的最低要求（2026-09-10 起，`vdsh build` / `update dsh` 的教训）**：非 0 退出必须同时给出
+  **exit code + 根因线索（末尾若干行子进程输出）+ 可回溯的完整日志路径 + 下一步命令**；长输出任务还要点明
+  「当前处于哪一阶段成功、哪一阶段失败」（如「代码已更新、仅构建未完成」），否则真失败与误报在终端上无法区分。
+  日志落 `%TEMP%`（`config.BUILD_LOG_PATH`），成功即删、失败保留——只留最近一次失败现场。
 - **一律走 `vdsh/console.py`**（say/step/warn/die/fail/ok/progress），不要裸 `print` 到 stdout/stderr 或手写前缀。退出码只经 `die(code=...)` 或 feature `return`。
 - **配置读取**：功能入口的参数是 `settings`（完整 dict，永不为 None）；环境覆盖用 `settings.effective_*`。
 - **动画**：等待型子进程用 `spinner.run_child_progress(cmd, message, env=..., timeout=...)`；pnpm 类子进程另传 `collect=[]` 与 `quiet=pnpm_log.Noise()`（把它的噪声折叠成 `→` 进度行）；手工异步进度用 `Spinner.say()`。
@@ -101,9 +106,15 @@ tailnet = S.effective_tailnet(cli_value, settings)
 4. **PS 脚本**：每次编辑后 `powershell -File doc/…` 用 `[System.Management.Automation.Language.Parser]::ParseFile` 校验 + 恢复 BOM（用 ReadAllText(UTF8 无 BOM) + WriteAllText(UTF8 带 BOM)）。
 5. **退出码**：不接管道运行并 `echo $LASTEXITCODE`（管道 + Select-Object 会吞掉/污染退出码）。
 6. **profile 插件校验与输出分流**（2026-09-10 起）：`tempfile` 造最小 profile（`package.json` + `pnpm-lock.yaml` + `node_modules/<name>/package.json` + `node_modules/.modules.yaml`）断言 `profile_state.verify/diff_plugins`；
-   输出分流用假 TTY 流 + `python -u` 子进程逐行打印样本（噪声/真错误两路），断言：原始噪声零输出、`→ …` 进度行生成且节流、**转轮文案恒为任务名**、非 0 退出补打折叠行、非 TTY 全量。
+   输出分流用假 TTY 流 + `python -u` 子进程逐行打印样本（噪声/真错误两路），断言：原始噪声零输出、`→ …` 进度行生成且节流、**转轮文案恒为任务名**、非 0 退出补打折叠行、非 TTY 全量、
+   `tail_out` 收到含折叠行的完整行序、**后代进程抱住 stdout 时按「进程已退出」立即收尾**（跑满 60s 算失败）、**子进程仍在跑但零输出时 `STALL_SECONDS` 有界终止**、
+   **瞬退子进程 5 次往返不丢行**、命令不存在返回 `EXIT_SPAWN_FAILED` 且不抛 traceback。
    三个脚本在本会话以 `%TEMP%\vdsh_profile_state_check.py` / `vdsh_spinner_check.py` / `vdsh_output_preview.py`（端到端看用户实际输出）形式存在（不入库）；
    脚本内先 `sys.stdout.reconfigure(encoding='utf-8')`，子进程也要（管道下 Python 默认 GBK，非 ASCII 行会崩——experience.md §2.1）。
+7. **`update dsh` 判定与失败诊断**（2026-09-10 起）：`%TEMP%\vdsh_update_dsh_check.py`（离线，不入库）——stub pnpm（`echo` 造行 + `exit /b N`）
+   验证 `run_build` 的失败诊断（末尾输出 / 完整日志落盘 / `code_is_new` 文案 / 退出码 3）、成功清理日志、命令缺失退 4；
+   临时 git 仓库验证 `_git_stdout` 只取 stdout（对比 `_git_quiet`）；stub `_git_stdout`/`run_child_progress`/`run_build` 验证 `_update_dsh` 的三条判定（已是最新 / 有更新 / 快进失败）。
+   真机只读复测：`%TEMP%\vdsh_update_live_check.py`（跳过运行中询问，其余真跑；无远端更新时应 `vdsh ✓ dsh 已是最新` 且退出码 0）。
 
 ## 6. 测试与发布流程
 

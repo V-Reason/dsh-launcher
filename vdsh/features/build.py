@@ -6,24 +6,32 @@ launcher 在启动前完成时效检测并按需构建。
 
 输出遵循同一标准：转轮 = 任务性质 + 秒数，pnpm 自身噪声折叠成 `→ …` 进度行
 （构建工具的真实输出照常透传），结束 `vdsh ✓ 构建完成` + 单独一行耗时。
+
+失败诊断（不受输出简约约束）：子进程输出全程落盘到 `config.BUILD_LOG_PATH`，
+非 0 退出时复述**末尾 15 行**（构建工具的真报错都在尾部）+ 完整日志路径，
+并说明「代码已更新、仅构建失败」，避免只有一句 exit code 的「无证据失败」。
 """
 
 import os
 import shutil
+import sys
 import time
 
 from .. import settings as settings_mod
 from ..config import (
+    BUILD_LOG_PATH,
     BUILD_PROMPT,
+    BUILD_TAIL_LINES,
     CLI_REL,
     DIST_REL,
     EXIT_BUILD,
+    EXIT_DEPS,
     EXIT_USAGE,
     SRC_DIRS,
 )
-from ..console import die, ok, step
-from ..pnpm_log import Noise
-from ..spinner import run_child_progress
+from ..console import die, ok, step, warn
+from ..pnpm_log import Noise, has_network_failure
+from ..spinner import EXIT_SPAWN_FAILED, run_child_progress
 
 NAME = "build"
 SUMMARY = "执行仓库构建（pnpm run build，带动画）"
@@ -66,17 +74,77 @@ def confirm_build():
     return answer in ("", "y", "yes")
 
 
-def run_build(repo):
-    pnpm = shutil.which("pnpm")
+def _write_build_log(lines):
+    """把构建输出全文落盘（失败时可回溯）；写不进去只告警，不影响构建结论。"""
+    try:
+        with open(BUILD_LOG_PATH, "w", encoding="utf-8", errors="replace") as handle:
+            for line in lines:
+                handle.write(line + "\n")
+        return True
+    except OSError as error:
+        warn("构建日志未能写入 %s：%s" % (BUILD_LOG_PATH, error))
+        return False
+
+
+def _prune_build_log():
+    """构建成功后删除日志：只保留最近一次失败现场，避免 %TEMP% 堆积。"""
+    try:
+        os.remove(BUILD_LOG_PATH)
+    except OSError:
+        pass
+
+
+def run_build(repo, pnpm=None, code_is_new=False):
+    """执行 pnpm run build；失败时给出 exit code + 末尾输出 + 完整日志路径。
+
+    pnpm：可选的 pnpm 可执行文件路径（默认按 PATH 解析；测试用注入 stub）。
+    code_is_new：调用方是否刚把检出的代码更新到最新（`vdsh update dsh` 传 True）——
+    只影响失败收尾那句「代码已更新、仅构建失败」是否成立。
+    """
     if pnpm is None:
-        die("未找到 pnpm（请安装 pnpm 并加入 PATH）", EXIT_BUILD)
+        pnpm = shutil.which("pnpm")
+    if pnpm is None:
+        # 退出码与 update 侧一致：pnpm 缺失是环境依赖问题（EXIT_DEPS），不是构建失败。
+        die("未找到 pnpm（请安装 pnpm 并加入 PATH）", EXIT_DEPS)
     noise = Noise()
+    lines = []
     started = time.monotonic()
-    code = run_child_progress([pnpm, "run", "build"], "构建", cwd=repo, quiet=noise)
+    # 失败时**只看末尾几行**（构建工具的真报错都在尾部、且一定没被折叠）：
+    # 用 collect 收全量、自己只打末尾，避免「折叠行补打 + tail 复述」把同一批行打两遍。
+    code = run_child_progress([pnpm, "run", "build"], "构建", cwd=repo, quiet=noise,
+                              collect=lines)
+    duration = time.monotonic() - started
+    if code == EXIT_SPAWN_FAILED:
+        die("无法启动 pnpm（%s）：请确认可执行且未被安全软件拦截" % pnpm, EXIT_DEPS)
     if code != 0:
-        die("构建失败（exit code %d），请手动检查" % code, EXIT_BUILD)
+        _report_build_failure(repo, code, lines, code_is_new)
+        die("构建失败（exit code %d）" % code, EXIT_BUILD)
+    _prune_build_log()
     ok("构建完成")
-    step("用时 %.1fs" % (time.monotonic() - started))
+    step("用时 %.1fs" % duration)
+
+
+def _report_build_failure(repo, code, lines, code_is_new):
+    """失败诊断（不受输出简约约束）：末尾输出 + 完整日志 + 仓库状态说明。
+
+    code_is_new：调用方是否刚把检出的代码更新到最新（update dsh 的构建段）——
+    决定收尾那句是「代码已更新、仅构建失败」还是纯「构建失败」。
+    """
+    print("", file=sys.stderr)
+    warn("构建输出末尾 %d 行（完整日志见下）：" % min(BUILD_TAIL_LINES, len(lines)))
+    for line in lines[-BUILD_TAIL_LINES:]:
+        print(line, file=sys.stderr)
+    if _write_build_log(lines):
+        warn("完整构建日志：%s" % BUILD_LOG_PATH)
+    if has_network_failure(lines):
+        warn("构建失败（exit code %d），疑似网络不可达（可配置 HTTPS_PROXY 或稍后重试）" % code)
+    else:
+        warn("构建失败（exit code %d）：上面末尾输出即根因线索" % code)
+    if code_is_new:
+        warn("仓库代码已更新到最新，仅构建未完成；修复后可重跑 `vdsh build`，"
+             "或在 %s 手动执行 `pnpm install && pnpm run build`" % repo)
+    else:
+        warn("可修复后重跑 `vdsh build`，或在 %s 手动执行 `pnpm install && pnpm run build`" % repo)
 
 
 def run(argv, settings):

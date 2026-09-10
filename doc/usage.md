@@ -113,6 +113,16 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
 - **分开执行**：`dsh` 更新 Harness 检出（`launcher.repo`，须为 git 检出且配置了上游分支）；`plugin` 更新 `$DSH_HOME/profiles/<p>` 的插件依赖（官方 dsh CLI 通路，新版本声明 `dsh.bundle` 会自动激活为 profile 层）。
 - 两者在 **dsh web 运行中**都会询问（`[y/N]`，非交互/EOF 默认中止）：Windows 下运行中的服务会锁定文件，且更新的版本需要重启才生效。
 - `update dsh`：仓库有未提交改动也会询问确认；动作顺序为 fetch → merge（本地有提交时常规合并，冲突中止并提示）→ `pnpm install` → `pnpm run build`，全程带动画，结束显示新旧版本号。
+- **失败时看什么（不受输出简约约束）**：`update dsh` 的每一步都会给出 exit code 与下一步，不会只留一句「请手动检查」。
+  - `git fetch` 失败 → 指向网络/远端可达性；合并失败分两种：**本地有领先提交**（真冲突，提示 `git status`）与
+    **本地无领先提交却无法快进**（上游被 force push/重建，提示 `git log --oneline HEAD..<upstream>` 与
+    `git reset --hard <upstream>` 两条路），不会再笼统地说「请检查冲突」。
+  - `pnpm install` 失败 → exit code + 是否命中网络类指纹（指向 `HTTPS_PROXY`）。
+  - `pnpm run build` 失败 → 补打**末尾 15 行**子进程输出（构建工具的报错都在尾部）+ **完整构建日志路径**
+    `%TEMP%\vdsh-build.log`（成功即删，只保留最近一次失败现场），并点明「代码已更新到最新、仅构建未完成」，
+    避免把「已拉到新代码但构建没过」误读成「更新没生效」。
+  - 命令本身起不来（pnpm 被安全软件拦截/文件被占用）→ `vdsh ✗ 无法启动命令（…）`，不再是 Python traceback；
+    子进程退出后若后代进程仍抱着输出句柄不放，10 分钟无输出即按卡死终止（不会永久挂住）。
 - `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后只提示「重启 dsh web 后生效」。
   （副机同步不含在提示里：需要时自己 `vdsh sync push` 把新的 `package.json`/`pnpm-lock.yaml` 推过去。）
 - **更新时看到什么**：运行期间只有两种行——转轮行 `⠋ 更新插件 47s`（**当前任务性质 + 已等待秒数**，原地刷新）
@@ -187,9 +197,10 @@ node -e "fetch('https://github.com/omdsh-dev/dsh-at-file',{method:'HEAD'}).then(
 | 码 | 含义 |
 |---|---|
 | 0 | 成功 |
+| 1 | 硬失败（更新流程失败、构建/插件校验失败等运行期错误） |
 | 2 | 用法/环境错误（参数错误、仓库未找到等） |
-| 3 | 构建失败或 pnpm 缺失 |
-| 4 | 依赖缺失（requests / pyyaml） |
+| 3 | 构建失败（`pnpm run build` 非 0 退出） |
+| 4 | 依赖缺失（requests / pyyaml / node / pnpm） |
 | 5 | pwsh（PowerShell 7）缺失 |
 | 6 | 端口被占用但未识别为 Harness |
 

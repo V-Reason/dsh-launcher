@@ -293,3 +293,56 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 注册表 `path` 是否绝对路径、两端路径是否一致），再怀疑数据损坏。将来恢复该功能的候选路径：
 DSH 按 workspace id（而非绝对路径）检索会话；副机把主力机路径重映射成相同绝对路径
 （`subst`/junction 挂同盘符）；launcher 按 session id 聚合（不推荐，长期维护成本高）。
+
+## 9. 子进程与失败诊断
+
+### 9.1 `vdsh update dsh` 构建失败的「误报」其实是无证据失败（2026-09-10，实测复盘）
+
+**现象**：`vdsh update dsh` 报构建失败；随后在仓库根目录手动 `pnpm install && pnpm run build` 正常。
+用户判断为「误报或执行逻辑有问题」。
+
+**取证（不改文件的前提下能确定的部分）**：
+1. **用 vdsh 自己的执行器跑真实构建**：`run_child_progress([<pnpm.CMD>, "run", "build"], cwd=<repo>, quiet=Noise())`
+   → **exit=0**、25.7s、4084 行（`build: recorded 234 client artifact(s)`）。
+   同一执行器跑 `pnpm install` 也 exit=0。→ **调用链本身没问题，折叠机制也没吃掉成功判定**。
+2. **失败断点**：`git reflog`（`merge origin/master: Fast-forward` @14:34:47）+
+   `pnpm-lock.yaml`/`node_modules/.modules.yaml` 的 mtime（14:35:54）+ 构建产物 mtime（14:39）
+   → fetch/merge/**install 都成功了**，只有 build 那一次没过；用户随后的手动构建即 14:39 那次。
+3. **环境同构**：`pnpm config get engine-strict` 未设置、无 `.npmrc`、Node 24.15 + pnpm 11.7.0（`packageManager` 钉住）
+   —— 手动与 launcher 路径没有可见差异。
+
+**结论**：真实失败原因**无法复原**——因为改前的实现把构建的 4000+ 行输出只喂给折叠器，
+失败时只打一句 `构建失败（exit code N），请手动检查`。没有 tail、没有日志、没有阶段说明，
+所以「真失败」与「误报」在终端上**不可区分**。这类「无证据失败」本身就是缺陷。
+
+**修复（对症，不假装知道根因）**：
+- `spinner.run_child_progress(..., tail_out=[])`：另行收集**含被折叠行**的完整行序；
+- `features/build.run_build` 失败时：补打末尾 15 行 + 落盘 `%TEMP%\vdsh-build.log`（成功即删）+
+  点明「代码已更新到最新、仅构建未完成」；`code_is_new` 参数保证 `vdsh build` 不会误用这句话；
+- 补上三处会把「环境问题」伪装成「构建失败」的路径：命令起不来返回 `EXIT_SPAWN_FAILED(127)`
+  （原实现直接抛 traceback）、pnpm 缺失归 `EXIT_DEPS(4)`（原来错报 `EXIT_BUILD(3)`）、
+  快进失败时区分「本地有领先提交（真冲突）」与「本地无领先提交却无法快进（上游被 force push）」。
+
+### 9.2 四个「改完才发现」的子进程坑（同一迭代连续踩到）
+
+- **`proc.stdout.close()` 会把整个函数挂住**：读线程阻塞在 `BufferedReader` 上时持有缓冲区锁，
+  主线程的 `close()` 要等同一把锁 → 若后代进程仍抱着写端，`close()` 无限等待。
+  **现象**：明明有「600s 无输出判定」，函数却在 25s 后才返回——因为真正卡住的是 `close()`。
+  **解决**：`join(2s)` 读线程，未退出就**不 close**（daemon 线程随进程回收）。
+- **不能等 EOF：管道 EOF 与进程退出没有时序保证**（本机实测：子进程打印 9 行后 `sleep(0.45)` 退出，
+  读线程却在 `readline()` 里一直没拿到 EOF，主循环干等）。**这一条推翻了我最初的实现**——
+  改用哨兵行更糟（哨兵排在未取走的行前面 → 瞬退子进程丢输出）。
+  最终判据落在「**`proc.poll() is not None` 就把队列里已有的行取干净再收尾**」，
+  外加 `reader_done + unfinished_tasks == 0` 作为读线程正常收尾的快路径。
+  **教训**：以「进程已退出」为权威信号，不要以「流已关闭」为权威信号。
+- **`for line in proc.stdout` 只在 EOF 结束**：子进程已退出、但它的后代（如构建派生的 worker）
+  继承了写端且不退出时，读循环永远等不到 EOF，vdsh 表现为「卡死」。
+  **解决**：同上改为「进程退出即收尾」；此时如实打一句
+  `子进程已退出，但其后代仍占用输出句柄：后续输出不再等待（可能不完整）`，
+  并保留 `STALL_SECONDS`（进程仍在跑但 600s 零输出）作为兜底。
+- **`git status --porcelain` 的正确判定方式**：`_git_quiet` 合并了 stdout+stderr，
+  git 的警告（换行符、`known_hosts`、`fatal:` 提示）会被当成「有未提交改动」。
+  凡「有/无内容」类判定都要用只取 stdout 的 `_git_stdout`（本次新增）。
+- **形状校验别用 ASCII 白名单**：git 分支名允许中文（`origin/中文分支`），
+  用 `[A-Za-z0-9._/-]` 校验会把合法仓库判成「未配置上游」；
+  改为「两段、无空白/控制字符」的形状判定。

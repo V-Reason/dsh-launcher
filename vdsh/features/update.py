@@ -6,6 +6,9 @@
 
 - `vdsh update dsh`：Harness 检出 git fetch + merge（@upstream）+ pnpm install +
   pnpm run build（与 README 的从源安装流程一致），并显示新旧版本号。
+  失败诊断不受输出简约约束：merge/install 失败给 exit code 与恢复路径，build 失败
+  由 `features/build.run_build` 补打末尾输出并落盘完整日志（改前只有一句「请手动检查」，
+  真失败与误报在终端上无法区分）。
 - `vdsh update plugin [profile]`：经官方 dsh CLI 转发
   `pnpm update --latest`（自带 bundle 层重调解——新版本声明了 dsh.bundle 会自动
   激活，直连 pnpm 拿不到这一行为）；默认 profile = web。结束后按 profile_state 的
@@ -51,7 +54,12 @@ def _usage():
 
 
 def _git_quiet(repo, *args):
-    """在 repo 静默执行 git（本地只读/自查操作），返回 (退出码, 输出文本)。"""
+    """在 repo 静默执行 git（本地只读/自查操作），返回 (退出码, 输出文本)。
+
+    输出文本 = stdout + stderr 合并：调用方若要做「是否有内容」的判定（脏工作区、
+    分支名解析），必须改用 `_git_stdout`——git 的警告（换行符、SSH known_hosts 等）
+    走 stderr，合并后会变成「干净仓库凭空有改动」的误判。
+    """
     try:
         proc = subprocess.run(
             ["git", "-C", repo] + list(args),
@@ -64,6 +72,23 @@ def _git_quiet(repo, *args):
     if proc.stderr and proc.stderr.strip():
         text = text + ("\n" if text else "") + proc.stderr.strip()
     return proc.returncode, text
+
+
+def _git_stdout(repo, *args):
+    """同 `_git_quiet`，但**只取 stdout** 并逐行返回（供「有/无内容」类判定）。
+
+    返回 (退出码, [非空行…])；与 `_git_quiet` 一样吞掉可控异常并给 -1。
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", repo] + list(args),
+            capture_output=True, text=True, encoding="utf-8", errors="replace",
+            timeout=300,
+        )
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return -1, []
+    lines = [line.strip() for line in (proc.stdout or "").splitlines()]
+    return proc.returncode, [line for line in lines if line]
 
 
 def _version_of(package_json_dir):
@@ -88,6 +113,19 @@ def _confirm_still_updated():
     return (answer or "n").strip().lower() in ("y", "yes")
 
 
+def _valid_upstream(name):
+    """上游分支名形状校验：只接受「<remote>/<branch>」两段且无空白/控制字符。
+
+    刻意**不限制为非 ASCII**：git 分支名允许中文（`git rev-parse --abbrev-ref @{upstream}`
+    会原样返回 `origin/中文分支`），用 ASCII 白名单会把合法仓库判成「未配置上游」。
+    目的是挡住解析异常/警告文本被当成 ref 喂给后续 git 命令。
+    """
+    if not name or any(char.isspace() or ord(char) < 0x20 for char in name):
+        return False
+    parts = name.split("/")
+    return len(parts) == 2 and all(parts)
+
+
 def _update_dsh(settings):
     """更新 Harness 本体：fetch → merge @upstream → pnpm install → build。"""
     repo = settings_mod.effective_repo(settings)
@@ -104,14 +142,13 @@ def _update_dsh(settings):
         die("%s 不是 git 检出，无法自动更新；请用 git clone 安装（见 Harness README）后重试。" % repo,
             EXIT_USAGE)
 
-    code, dirty = _git_quiet(repo, "status", "--porcelain")
+    code, dirty = _git_stdout(repo, "status", "--porcelain")
     if code == 0 and dirty:
-        lines = dirty.splitlines()
-        warn("仓库有 %d 个未提交改动（如 %s …）：更新可能冲突或覆盖本地改动"
-             % (len(lines), lines[0].strip()))
+        warn("仓库有 %d 个未提交改动（如 %s …）：合并可能失败或覆盖本地改动"
+             % (len(dirty), dirty[0]))
         answer = ask("仍要继续更新？[y/N] ", default="n")
         if (answer or "n").strip().lower() not in ("y", "yes"):
-            step("已取消（处理完本地改动后重试，如 git stash）")
+            step("已取消（处理完本地改动后重试，如 git stash；自查 git status）")
             return 0
 
     old_version = _version_of(repo)
@@ -120,17 +157,18 @@ def _update_dsh(settings):
     if code != 0:
         die("获取远端更新失败（git fetch origin）：请确认网络与远端可达。", EXIT_ERROR)
 
-    code, upstream = _git_quiet(repo, "rev-parse", "--abbrev-ref", "@{upstream}")
-    if code != 0 or not upstream:
+    code, upstream_lines = _git_stdout(repo, "rev-parse", "--abbrev-ref", "@{upstream}")
+    upstream = upstream_lines[0] if upstream_lines else ""
+    # 形状校验：@{upstream} 解析失败或输出异常时，不要把杂串喂给后续 git 命令。
+    if code != 0 or not _valid_upstream(upstream):
         die("仓库未配置上游分支（@{upstream}），无法自动更新；请先 git push -u 建立跟踪后重试。",
             EXIT_USAGE)
-    upstream = upstream.splitlines()[0].strip()
 
     ahead, behind = 0, 0
-    code, counts = _git_quiet(repo, "rev-list", "--left-right", "--count",
-                              "HEAD...%s" % upstream)
+    code, counts = _git_stdout(repo, "rev-list", "--left-right", "--count",
+                               "HEAD...%s" % upstream)
     if code == 0 and counts:
-        match = re.match(r"^(\d+)\s+(\d+)$", counts.strip())
+        match = re.match(r"^(\d+)\s+(\d+)$", counts[0])
         if match:
             ahead, behind = int(match.group(1)), int(match.group(2))
     if behind == 0:
@@ -151,6 +189,11 @@ def _update_dsh(settings):
             ["git", "merge", "--ff-only", upstream],
             "合并远端更新", cwd=repo)
     if code != 0:
+        if ahead == 0:
+            # 本地没有领先提交却快进失败：不是冲突，而是上游历史被改写（force push/重建分支）。
+            die("合并远端更新失败（无法快进，本地无领先提交）：上游可能已被 force push 改写。"
+                "请先确认 `git log --oneline HEAD..%s`，再决定合并还是 `git reset --hard %s`；"
+                "手动处理完重跑本条命令即可。" % (upstream, upstream), EXIT_ERROR)
         die("合并远端更新失败：请检查冲突（git status）后重试，或手动 git pull。", EXIT_ERROR)
 
     new_version = _version_of(repo)
@@ -170,7 +213,8 @@ def _update_dsh(settings):
         die("pnpm install 失败（exit code %d%s）" % (code, tail), EXIT_ERROR)
 
     from . import build as build_feature
-    build_feature.run_build(repo)  # 失败时内部 die(EXIT_BUILD)
+    # 失败时内部 die(EXIT_BUILD)；code_is_new=True → 诊断里点明「代码已更新、仅构建未完成」。
+    build_feature.run_build(repo, code_is_new=True)
 
     ok("dsh 已更新（%s）" % new_version)
     step("用时 %s" % _format_duration(time.monotonic() - started))
