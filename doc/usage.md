@@ -56,7 +56,7 @@ vdsh help / -h / --help          用法
 | `launcher.auto_pull` | false | true = 每次启动前自动拉取 DSH 数据（等同每次加 `--sync`） |
 | `animation.fps` | 8 | TTY 动画帧率（1-60） |
 | `animation.frames` | `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏` | 动画帧序列 |
-| `animation.quiet` | true | true = TTY 下折叠子进程（pnpm）的低价值行（进度/重试/统计），进度改显示在转轮上；false = 全量输出（排障用）；非 TTY 恒为全量 |
+| `animation.quiet` | true | true = TTY 下折叠 pnpm 的低价值行（进度/重试/统计）并改打 `→ …` 进度行，转轮只显示当前任务与秒数；false = 全量输出（排障用）；非 TTY 恒为全量 |
 | `sync.data_dir` | （空） | DSH 数据目录；支持 `~` 展开（如 `~/.dsh`）；空 = `DSH_HOME` → `~/.dsh` |
 | `sync.remote` | （空） | 默认远端；`vdsh sync init <URL>`（成功时）与 `remote set` 都会写入此处，无参 `vdsh sync init` 时使用 |
 | `sync.allowlist` | 9 项列表 | 同步范围（相对数据目录）；含用户预设 `.agent-presets/` 与全局配置层 `cordis.patch.yml`，不存在自动跳过 |
@@ -113,22 +113,49 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
 - **分开执行**：`dsh` 更新 Harness 检出（`launcher.repo`，须为 git 检出且配置了上游分支）；`plugin` 更新 `$DSH_HOME/profiles/<p>` 的插件依赖（官方 dsh CLI 通路，新版本声明 `dsh.bundle` 会自动激活为 profile 层）。
 - 两者在 **dsh web 运行中**都会询问（`[y/N]`，非交互/EOF 默认中止）：Windows 下运行中的服务会锁定文件，且更新的版本需要重启才生效。
 - `update dsh`：仓库有未提交改动也会询问确认；动作顺序为 fetch → merge（本地有提交时常规合并，冲突中止并提示）→ `pnpm install` → `pnpm run build`，全程带动画，结束显示新旧版本号。
-- `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后提示重启 dsh web，并提醒 `vdsh sync push` 把新的 `package.json`/`pnpm-lock.yaml` 同步给副机。
-- **更新后校验（结论可信）**：`update plugin` 结束会给出**一行结论**，形如
-  `插件已确认为最新：5 个依赖的解析与 lockfile、磁盘三方一致；生效方式：profile 层 4 · 预设挂载 1`。
-  判定用三重证据：`package.json` 声明 ↔ `pnpm-lock.yaml` 记录 ↔ 磁盘 `node_modules/.modules.yaml` 的解析身份；
-  **git 依赖比 commit（版本号没变但 commit 变了也判为已更新）**，不再只看已装包的版本号。生效方式四态：
-  `profile 层`（声明 `dsh.bundle.patch` 且已在 `dsh.profile.bundles`）/ `预设挂载`（未声明 bundle，但被预设或补丁层引用，
-  如 `dsh-study-buddy` 由 `~/.dsh/.agent-presets/study` 挂载）/ `普通依赖`（未见引用，仅作库）/ `未激活`（声明了 bundle 却没进 bundles → **不会生效**）。
+- `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后只提示「重启 dsh web 后生效」。
+  （副机同步不含在提示里：需要时自己 `vdsh sync push` 把新的 `package.json`/`pnpm-lock.yaml` 推过去。）
+- **更新时看到什么**：运行期间只有两种行——转轮行 `⠋ 更新插件 47s`（**当前任务性质 + 已等待秒数**，原地刷新）
+  与 `→ …` 进度行（把 pnpm 的进度/重试翻译成一句人读的进度，如 `→ 解析 174 · 复用 7`、`→ 网络重试 1`，
+  按 3 秒节流，长停滞期也看得到动静）。其余 pnpm 噪声（统计行、成功回执、peer 提示等）折叠不打印；
+  命令真失败时，被折叠的行会原样补打，排查信息不丢。要看逐行全量：`animation.quiet: false`，或把输出重定向到文件（非 TTY 恒为全量）。
+- **更新后校验（结论可信）**：结束打**两行**——结论 `vdsh ✓ 插件已是最新（5 个依赖校验通过）`，耗时单独一行 `vdsh · 用时 1m46s`
+  （有更新时结论列出 `名字 旧→新`，git 依赖显示成 `0.7.0@da602d1→0.8.0@b1c9f2e`，所以「版本号没变但 commit 变了」也算更新）。
+  判定用三重证据：`package.json` 声明 ↔ `pnpm-lock.yaml` 记录 ↔ 磁盘 `node_modules/.modules.yaml` 的解析身份。
+  生效方式分四态——`profile 层`（声明 `dsh.bundle.patch` 且已在 `dsh.profile.bundles`）/ `预设挂载`（未声明 bundle 但被预设引用，
+  如 `dsh-study-buddy` 由 `~/.dsh/.agent-presets/study` 挂载）/ `普通依赖`（未见引用，仅作库）/ `未激活`（声明了却没进 bundles → **不会生效**）；
+  **逐插件明细在 `vdsh doctor` 里看**，结论行不展开解释。
   校验不通过（依赖缺失、未激活、磁盘与 lockfile 不一致）会逐条 `vdsh ✗` 并以退出码 1 结束；降级情形（缺 PyYAML、
-  无 `hoistedLocations`）只 `vdsh ⚠`，不误判。若 `dsh plugin` 退出码为 0 却完全没有 pnpm 的运行标记，结论行会附
-  `未见 pnpm 运行标记（更新可能未真正执行…）`——此时「确认为最新」只说明状态没变，请用 `vdsh doctor` 复核。
-  `vdsh doctor` 的「profile 插件」段输出同一套信息（每插件 版本/commit + 生效方式）。
+  无 `hoistedLocations`）只 `vdsh ⚠`，不误判。若 `dsh plugin` 退出码为 0 却完全没有 pnpm 运行标记，会补一句
+  `vdsh ⚠ 未见 pnpm 运行标记：本次可能未真正执行更新`——此时结论只说明状态没变。
 - `vdsh doctor` 可体检已安装插件与 DSH 版本是否适配。
+
+## 输出约定与常见告警（所有命令同一套）
+
+vdsh 的终端输出只有四种东西——**转轮、进度、节点、结论**；解释性长文归文档与 `vdsh doctor`。
+
+| 元素 | 形式 | 含义 | 归属 |
+|---|---|---|---|
+| 转轮 | `⠋ 更新插件 47s` | 当前**任务性质** + 已等待秒数（原地刷新；不显示 pnpm 内部计数） | vdsh |
+| 进度 | `→ 解析 174 · 复用 7` / `→ 网络重试 1` | 子进程步骤，或翻译后的 pnpm 进度（按 3 秒节流） | vdsh 转发/翻译 |
+| 节点 | `vdsh · 更新 5 个插件依赖（profiles/web）…` / `vdsh · 用时 1m46s` | 开始做什么 / 收尾数据 | vdsh |
+| 结论 | `vdsh ✓ 插件已是最新（5 个依赖校验通过）` / `vdsh ✗ …` / `vdsh ⚠ …` | 成功 / 失败 / 提示（成功结论 + 耗时是两行） | vdsh |
+| （第三方） | `> dsh@0.1.3 build` / `vite …` / `1a2b3c4..5d6e7f8` / `[WARN] …` | 子进程的真实输出：构建工具、git、pnpm 的自有格式 | 各自工具 |
+
+命令对应的形态：
+
+- `vdsh` / `vdsh build` / `vdsh update dsh` / `vdsh update plugin`：转轮 + `→` 进度 + `vdsh ✓` 结论 + `vdsh · 用时 …`。
+- `vdsh sync <子命令>`：由 `sync-dsh.ps1` 自己打印（`→ 步骤`、`✓/⚠/✗ 结论`、`  耗时 2.3s`）——它是可脱离 vdsh 独立运行的脚本，
+  保留自有文案；vdsh 只把转轮文案对齐成任务性质（`推送 DSH 数据`），并在启动前自动拉取时补一句结论。
+- **报告类**（`vdsh config`、`vdsh doctor`、`vdsh sync status`）：不打转轮，直接用各自的分组/`✓ ✗ ⚠ —` 报告格式。
+- **向导类**（首次运行向导、`vdsh setup`、`vdsh sync init` 无参、构建前确认、更新前确认）：保留提问与缩进提示，
+  这类是人机对话，不套用上述格式；`dsh.cmd`（官方 CLI 转发壳）同理，前缀用 `dsh`。
+
+失败时**诊断不受此约定限制**：exit code、下一步命令、`vdsh ✗` 明细、被折叠行的补打都会完整给出。
 
 ### 输出里的 `[WARN]` 怎么看
 
-`[WARN]` 前缀是 **pnpm 自己打印的**；vdsh 自己的输出一律带 `vdsh ·` / `vdsh ⚠` / `vdsh ✗`。两类常见 `[WARN]` 都属预期，更新已成功：
+`[WARN]` 前缀是 **pnpm 自己打印的**；vdsh 的输出一律带上表的 `vdsh ·`/`vdsh ✓`/`vdsh ✗`/`vdsh ⚠` 或转轮、`→` 前缀（TTY 下这些 `[WARN]` 通常已被折叠成 `→ 网络重试 N` 之类的一行进度）。两类常见 `[WARN]` 都属预期，更新已成功：
 
 - `[WARN] HEAD https://github.com/<owner>/<repo> error (ECONNRESET|ETIMEDOUT). Will retry in … retries left.`
   —— pnpm 在解析 `github:` 依赖时探测「仓库是否公开」（`HEAD https://github.com/x/y`）失败。该探测失败被 pnpm 吞掉，
@@ -138,7 +165,7 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
   `autoInstallPeers: false`），这些 peer（`@deepseek-ai/*`、`react` 等）由 Harness 安装层 `$DSH_HOME/profiles/node_modules` 提供，
   不装进 profile 才对（否则会出现重复的 cordis 实例）。看明细：`cd $env:DSH_HOME\profiles\web; pnpm peers check`。
 
-想逐行看全量输出：`animation.quiet: false`（或把输出重定向到文件，非 TTY 恒为全量）。命令真失败时，被折叠的行会原样补打，不会丢排查信息。
+这两个 `[WARN]` 在 TTY 下不会逐行出现——它们被折叠成 `→ 网络重试 N` 之类的一行进度；想逐行看全量：`animation.quiet: false`（或把输出重定向到文件，非 TTY 恒为全量）。命令真失败时，被折叠的行会原样补打，不会丢排查信息。
 
 ### `github.com:443` 不可达怎么办
 

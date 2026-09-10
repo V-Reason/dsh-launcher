@@ -184,7 +184,9 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 `git ls-remote https://github.com/…` 21s 后 `Could not connect to server`，而 `git@github.com:…`（SSH）4.3s 成功并返回 lockfile 记录的 commit。
 
 **影响与边界**：正确性不受影响（探测失败 → 回退 git/SSH 解析，lockfile 因此记为 `git+ssh://…#<sha>`）；代价是每次更新多十几秒 + 吓人的 WARN。
-彻底消除靠用户侧放行或配 `HTTPS_PROXY`（`no_proxy`/`https-proxy` 亦受支持，见 pnpm 的 `EnvHttpProxyAgent`）；vdsh 侧只做「让输出自解释」，不改 pnpm 行为。
+彻底消除靠用户侧放行或配 `HTTPS_PROXY`（`no_proxy`/`https-proxy` 亦受支持，见 pnpm 的 `EnvHttpProxyAgent`）；vdsh 侧的处理是**把这类噪声折叠掉、只翻译出一行进度**
+（如 `→ 网络重试 3`），不改 pnpm 行为，也不在输出里解释它——解释在本文与 `usage.md`。用户对输出的要求只有「当前进度 + 是否成功」：
+结论只留 `vdsh ✓ 插件已是最新（5 个依赖校验通过）`，耗时单独一行 `vdsh · 用时 1m46s`；把 WARN 的来龙去脉写进结论行会被判为「不明所以的说明」。
 
 **复现**：`Test-NetConnection github.com -Port 443`（False）+ `Test-NetConnection codeload.github.com -Port 443`（True）足以定性。
 

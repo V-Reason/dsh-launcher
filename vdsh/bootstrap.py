@@ -12,6 +12,7 @@ import sys
 
 from .config import DEFAULT_REPO
 from . import settings as settings_mod
+from .console import fail, step, warn
 
 
 def _valid_repo(path):
@@ -47,10 +48,9 @@ def _ask_repo():
         value = answer or default
         if _valid_repo(value):
             return value
-        print("vdsh ✗ 未在 %s 找到 package.json，请检查后重新输入" % value, file=sys.stderr)
+        fail("未在 %s 找到 package.json，请检查后重新输入" % value)
     value = (answer or default).strip()
-    print("vdsh ⚠ 未检测到 package.json（%s）；启动时会再次检查，可随时 vdsh setup 修改。"
-          % value, file=sys.stderr)
+    warn("未检测到 package.json（%s）；启动时会再次检查，可随时 vdsh setup 修改" % value)
     return value
 
 
@@ -85,12 +85,11 @@ def run_setup():
     """
     if not sys.stdin.isatty():
         settings_mod.ensure_config_template()
-        print("vdsh ⚠ 非交互环境：已生成默认配置 %s；"
-              "请编辑其中 launcher.repo 或运行 vdsh setup 配置 DSH 安装目录。"
-              % settings_mod.CONFIG_PATH, file=sys.stderr)
+        warn("非交互环境：已生成默认配置 %s；请编辑其中 launcher.repo 或运行 vdsh setup 配置"
+             " DSH 安装目录" % settings_mod.CONFIG_PATH)
         return 0
 
-    print("vdsh · 首次配置向导（Ctrl+C 可中止；随时可 vdsh setup 重跑）")
+    step("首次配置向导（Ctrl+C 可中止；随时可 vdsh setup 重跑）")
     repo = _ask_repo()
     data_dir = _ask_data_dir()
     tailnet = _ask_tailnet()
@@ -109,9 +108,9 @@ def run_setup():
         for warning in warnings:
             print(warning, file=sys.stderr)
         if ok:
-            print("vdsh · 配置已写入 %s（vdsh config 查看生效值）" % settings_mod.CONFIG_PATH)
+            step("配置已写入 %s（vdsh config 查看生效值）" % settings_mod.CONFIG_PATH)
         else:
-            print("vdsh ⚠ 配置写入失败，请手动编辑 %s" % settings_mod.CONFIG_PATH, file=sys.stderr)
+            warn("配置写入失败，请手动编辑 %s" % settings_mod.CONFIG_PATH)
     else:
-        print("vdsh · 已使用默认配置 %s（启动时如仓库无效会再次提示）" % settings_mod.CONFIG_PATH)
+        step("已使用默认配置 %s（启动时如仓库无效会再次提示）" % settings_mod.CONFIG_PATH)
     return 0

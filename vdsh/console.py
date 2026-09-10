@@ -48,6 +48,16 @@ def fail(message):
     print("vdsh ✗ %s" % message, file=sys.stderr)
 
 
+def ok(message):
+    """结果成功行（✓）：用于「成功了没有」这句结论，与 doctor 的 ✓ 同风格。"""
+    print("vdsh ✓ %s" % message)
+
+
+def progress(message):
+    """进度行（→）：子进程步骤或翻译后的进度事实；等待期间由 spinner 代打。"""
+    print("→ %s" % message)
+
+
 def ask(prompt, default=None):
     """交互询问一行；空输入返回 default；EOF 返回 None（无默认时亦返回 None）。"""
     try:

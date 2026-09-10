@@ -20,12 +20,14 @@
 | `vdsh/settings.py` | vdsh.yaml 全部语义 | **TEMPLATE 与 DEFAULTS/VALIDATORS 需同步改**；模板是 raw 字符串，首行不能以 `\` 开头 |
 | `vdsh/config.py` | 常量 | 退出码新增在此 |
 | `vdsh/bootstrap.py` | 向导 | 与 `features/setup.py` 共用；提问接受逻辑在此 |
-| `vdsh/spinner.py` | 动画/子进程 | `configure()` 在 app 启动时设置全局（含 `animation.quiet`）；`run_child_progress(collect=, quiet=, replay_on_failure=)` 是「子进程输出分流」的唯一入口：折叠只针对成功路径，失败必补打，非 TTY 恒全量；新增超时/参数导出注意线程安全（见 experience.md） |
+| `vdsh/spinner.py` | 动画/子进程 | `configure()` 在 app 启动时设置全局（含 `animation.quiet`）；`run_child_progress(collect=, quiet=, replay_on_failure=)` 是「子进程输出分流」的唯一入口：quiet 的三个去向 = 原样打印 / 静默折叠 / 归一化进度行 `→ …`（打印后把转轮文案复位为任务名）；折叠只针对成功路径，失败必补打，非 TTY 恒全量；新增超时/参数导出注意线程安全（见 experience.md） |
+| `vdsh/console.py` | 输出标准的唯一出口 | `step`（节点）/`ok`（✓）/`fail`（✗ 不退出）/`die`（✗ 退出）/`warn`（⚠）/`progress`（`→`）；**新代码不要裸 print 或手写前缀**；输出形态约定见 dev.md §3 |
+| `vdsh/pnpm_log.py` | pnpm 输出分流 | 纯标准库；`Noise()` 作 `quiet` 回调，把 pnpm 的统计/重试/回执行折叠成 `→` 进度行（按种类节流）；`has_network_failure()` 给失败文案指路；规则变更须同步 dev.md §5 的分流用例 |
 | `vdsh/profile_state.py` | profile 插件状态校验 | 纯标准库（PyYAML 仅用于 lockfile 交叉校验，缺失降级）；三重证据 = `package.json` ↔ `pnpm-lock.yaml` ↔ `node_modules/.modules.yaml` 的 `hoistedLocations`；git 依赖比 commit；生效方式四态；`hoistedLocations` 键不可用 rsplit 拆（见 experience.md §7.5） |
 | `vdsh/module_fallback.py` | 模块回退目录自愈 | 纯标准库；判定必须与 app-boot `ensureSymlink` 对齐（链接/proxy 保留，其余删除）；launch 与 dsh_cli 双通道调用；data_dir 缺省 `~/.dsh` |
 | `vdsh/features/sync.py` | 同步桥 | 退出码透传语义 0-4 不能变；`init` 无参（TTY）= 配置向导（repo/data_dir/remote 校验并写 vdsh.yaml）；同步脚本是 `dsh-data-git-sync/sync-dsh.ps1` |
 | `dsh_cli.py` | 官方 CLI 转发壳（dsh.cmd 调用） | 纯标准库；按 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES` 解析并转发 node；不写配置 |
-| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并**只打一行结论**；噪声规则在 `_PnpmNoise`，新增规则须同步 §5 折叠用例 |
+| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例 |
 | `dsh-data-git-sync/sync-dsh.ps1` | 同步本体 | **UTF-8 BOM 文件**；任何编辑器保存可能去 BOM（PS 5.1 会按 GBK 误读 → 全文件报错）；`BuiltinIgnoreRules` 里的路径是同步卫生红线（junction 展开入库的坑，见 experience.md §8.5），新排除项进这里而非 `gitignore_extra` |
 
 ## 2. 新增一个功能（5 步）
@@ -60,9 +62,15 @@ FEATURES = {..., "agent": (agent.NAME, agent.SUMMARY, agent.run)}
 
 ## 3. 编码约定
 
-- **输出**：一律走 `vdsh/console.py`（say/step/warn/die），不要裸 `print` 到 stderr 或混用前缀。退出码只经 `die(code=...)` 或 feature `return`。
+- **输出（唯一标准，2026-09-10 起）**：终端输出只有四种东西——转轮 `⠋ 任务性质 47s`（`spinner` 自动追加秒数；消息只写任务名，
+  不带 `…`、不写内部计数）、进度 `→ 事实`（`console.progress()` 或 `quiet` 回调返回的归一化进度行）、节点 `vdsh · …`（`console.step()`）、
+  结论 `vdsh ✓/✗/⚠`（`console.ok()/die()/fail()/warn()`）；成功任务的**耗时单独一行** `vdsh · 用时 1m46s`。
+  **解释性长文不进输出**（归 `doc/` 与 `vdsh doctor`）；失败诊断（exit code、下一步命令、被折叠行补打）不受此限。
+  **例外**：报告类（`config`/`doctor`/`sync status`）用各自报告格式；向导类（提问/缩进提示）保留人机对话形态；
+  `sync-dsh.ps1` 可脱离 vdsh 独立运行，保留自有文案（符号体系同为一套 `→/✓/⚠/✗`）。详见 usage.md「输出约定与常见告警」。
+- **一律走 `vdsh/console.py`**（say/step/warn/die/fail/ok/progress），不要裸 `print` 到 stdout/stderr 或手写前缀。退出码只经 `die(code=...)` 或 feature `return`。
 - **配置读取**：功能入口的参数是 `settings`（完整 dict，永不为 None）；环境覆盖用 `settings.effective_*`。
-- **动画**：等待型子进程用 `spinner.run_child_progress(cmd, message, env=..., timeout=...)`；手工异步进度用 `Spinner.say()`。
+- **动画**：等待型子进程用 `spinner.run_child_progress(cmd, message, env=..., timeout=...)`；pnpm 类子进程另传 `collect=[]` 与 `quiet=pnpm_log.Noise()`（把它的噪声折叠成 `→` 进度行）；手工异步进度用 `Spinner.say()`。
 - **进程**：需要捕获输出的用 `run_child_progress`（内部已处理 UTF-8/流式/Ctrl+C/超时）；需要继承 stdio 的（交互菜单、Read-Host）用 `subprocess.call`。
 - **提示文案保持中文**；英文仅限代码与标识符。
 - **不加新运行时依赖**。确有需要（如 YAML 这类）惰性导入 + 清晰报错，见 `settings.load_settings` 的 pyyaml 处理。
@@ -92,9 +100,10 @@ tailnet = S.effective_tailnet(cli_value, settings)
 3. **同步**：临时 DSH_HOME + `git init --bare` 本地远端 + 临时 vdsh.yaml 配置（`sync.remote`/`allowlist`/`gitignore_extra`/`commit_name`）验证 init/push 的暂存范围、.gitignore 内容、提交身份、`remote set` 的 git origin + yaml 行替换（注释保留）。
 4. **PS 脚本**：每次编辑后 `powershell -File doc/…` 用 `[System.Management.Automation.Language.Parser]::ParseFile` 校验 + 恢复 BOM（用 ReadAllText(UTF8 无 BOM) + WriteAllText(UTF8 带 BOM)）。
 5. **退出码**：不接管道运行并 `echo $LASTEXITCODE`（管道 + Select-Object 会吞掉/污染退出码）。
-6. **profile 插件校验与输出折叠**（2026-09-10 起）：`tempfile` 造最小 profile（`package.json` + `pnpm-lock.yaml` + `node_modules/<name>/package.json` + `node_modules/.modules.yaml`）断言 `profile_state.verify/diff_plugins`；
-   折叠逻辑用假 TTY 流 + `python -u` 子进程逐行打印样本（噪声/真错误两路），断言噪声零输出、转轮文案更新、**非 0 退出补打折叠行**、非 TTY 全量。
-   两个脚本在本会话以 `%TEMP%\vdsh_profile_state_check.py` / `%TEMP%\vdsh_spinner_check.py` 形式存在（不入库）；脚本内先 `sys.stdout.reconfigure(encoding='utf-8')`，否则 GBK 控制台下非 ASCII 输出报 UnicodeEncodeError（experience.md §2.1）。
+6. **profile 插件校验与输出分流**（2026-09-10 起）：`tempfile` 造最小 profile（`package.json` + `pnpm-lock.yaml` + `node_modules/<name>/package.json` + `node_modules/.modules.yaml`）断言 `profile_state.verify/diff_plugins`；
+   输出分流用假 TTY 流 + `python -u` 子进程逐行打印样本（噪声/真错误两路），断言：原始噪声零输出、`→ …` 进度行生成且节流、**转轮文案恒为任务名**、非 0 退出补打折叠行、非 TTY 全量。
+   三个脚本在本会话以 `%TEMP%\vdsh_profile_state_check.py` / `vdsh_spinner_check.py` / `vdsh_output_preview.py`（端到端看用户实际输出）形式存在（不入库）；
+   脚本内先 `sys.stdout.reconfigure(encoding='utf-8')`，子进程也要（管道下 Python 默认 GBK，非 ASCII 行会崩——experience.md §2.1）。
 
 ## 6. 测试与发布流程
 

@@ -3,10 +3,14 @@
 
 插件做不到的事：构建发生在 DSH 进程之外（仓库侧文件与 pnpm），
 launcher 在启动前完成时效检测并按需构建。
+
+输出遵循同一标准：转轮 = 任务性质 + 秒数，pnpm 自身噪声折叠成 `→ …` 进度行
+（构建工具的真实输出照常透传），结束 `vdsh ✓ 构建完成` + 单独一行耗时。
 """
 
 import os
 import shutil
+import time
 
 from .. import settings as settings_mod
 from ..config import (
@@ -17,7 +21,8 @@ from ..config import (
     EXIT_USAGE,
     SRC_DIRS,
 )
-from ..console import die, step
+from ..console import die, ok, step
+from ..pnpm_log import Noise
 from ..spinner import run_child_progress
 
 NAME = "build"
@@ -65,10 +70,13 @@ def run_build(repo):
     pnpm = shutil.which("pnpm")
     if pnpm is None:
         die("未找到 pnpm（请安装 pnpm 并加入 PATH）", EXIT_BUILD)
-    code = run_child_progress([pnpm, "run", "build"], "构建中…", cwd=repo)
+    noise = Noise()
+    started = time.monotonic()
+    code = run_child_progress([pnpm, "run", "build"], "构建", cwd=repo, quiet=noise)
     if code != 0:
         die("构建失败（exit code %d），请手动检查" % code, EXIT_BUILD)
-    step("构建完成。")
+    ok("构建完成")
+    step("用时 %.1fs" % (time.monotonic() - started))
 
 
 def run(argv, settings):

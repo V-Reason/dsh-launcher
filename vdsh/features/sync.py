@@ -35,18 +35,19 @@ from ..config import (
     SYNC_PS1,
     sync_host,
 )
-from ..console import die
+from ..console import die, fail, step, warn
 from ..spinner import run_child_progress
 
 NAME = "sync"
 SUMMARY = "DSH 数据同步（init/push/pull/status/remote；无参 = 交互菜单）"
 
 # 需要动画的子命令（长时等待）；status/remote 为本地操作、help 即时，直通即可。
+# 转轮文案 = 任务性质（不含省略号，秒数由动画追加）。
 ANIMATED_SUBCOMMANDS = ("push", "pull", "init")
 MESSAGES = {
-    "push": "推送 DSH 数据…",
-    "pull": "拉取 DSH 数据…",
-    "init": "初始化 DSH 数据同步…",
+    "push": "推送 DSH 数据",
+    "pull": "拉取 DSH 数据",
+    "init": "初始化 DSH 数据同步",
 }
 
 
@@ -244,7 +245,7 @@ def _interactive_init(settings):
     返回远端 URL（随后交由脚本执行 init），None = 用户跳过/取消（不执行）。
     """
     print()
-    print("vdsh · 数据同步初始化向导（回车=默认；s=跳过该项；Ctrl+C 取消）")
+    step("数据同步初始化向导（回车=默认；s=跳过该项；Ctrl+C 取消）")
     print("      副机首次接入：填写本机 Harness 仓库、DSH 数据目录与主力机共享裸仓库地址。")
 
     # [1/3] repo：当前配置无效时自动改用本机探测到的仓库（跨机复制 launcher 的自愈）。
@@ -262,11 +263,10 @@ def _interactive_init(settings):
     repo, state = _prompt_value("[1/3] DSH 安装目录（Harness 仓库根，含 package.json）",
                                 default_repo, _valid_repo_path)
     if state == "cancel":
-        print("vdsh · 已取消（未执行初始化）")
+        step("已取消（未执行初始化）")
         return None
     if state == "invalid":
-        print("vdsh ⚠ 连续输入无效，跳过 repo（vdsh 启动时会再检查；可稍后 vdsh setup）",
-              file=sys.stderr)
+        warn("连续输入无效，跳过 repo（vdsh 启动时会再检查；可稍后 vdsh setup）")
         repo = None
     if repo and state == "ok":
         for note in _repo_notes(repo):
@@ -280,10 +280,10 @@ def _interactive_init(settings):
     data_dir, state = _prompt_value("[2/3] DSH 数据目录（数据同步根；支持 ~）",
                                     current_dir, _valid_data_dir)
     if state == "cancel":
-        print("vdsh · 已取消（未执行初始化）")
+        step("已取消（未执行初始化）")
         return None
     if state == "invalid":
-        print("vdsh ⚠ 连续输入无效，跳过 data_dir（保留现有配置）", file=sys.stderr)
+        warn("连续输入无效，跳过 data_dir（保留现有配置）")
         data_dir = None
     if data_dir and state == "ok":
         # 用户改了路径时重新按最终值提示（默认值已在上方提示过，避免重复）。
@@ -302,10 +302,10 @@ def _interactive_init(settings):
     remote, state = _prompt_value("[3/3] 远端数据仓库地址（裸仓库）",
                                   current_remote, _validate_remote_input)
     if state == "cancel":
-        print("vdsh · 已取消（未执行初始化）")
+        step("已取消（未执行初始化）")
         return None
     if state == "invalid":
-        print("vdsh ⚠ 连续输入无效，跳过 remote（保留现有配置）", file=sys.stderr)
+        warn("连续输入无效，跳过 remote（保留现有配置）")
         remote = None
     if remote and state == "ok":
         _url, warnings, _reason = _normalize_remote(remote)
@@ -314,8 +314,8 @@ def _interactive_init(settings):
             print("      %s" % warning)
 
     if not remote:
-        print("vdsh · 未提供远端地址，初始化未执行。用法: vdsh sync init <URL>"
-              "（或 vdsh sync remote set <URL> 后再运行）")
+        step("未提供远端地址，初始化未执行。用法: vdsh sync init <URL>"
+             "（或 vdsh sync remote set <URL> 后再运行）")
         return None
 
     # 写回 vdsh.yaml（文本级补丁，保留注释与其余键）。
@@ -329,9 +329,9 @@ def _interactive_init(settings):
     for warning in warnings:
         print(warning, file=sys.stderr)
     if ok_write:
-        print("vdsh · 配置已写入 vdsh.yaml（vdsh config 查看生效值）")
+        step("配置已写入 vdsh.yaml（vdsh config 查看生效值）")
     else:
-        print("vdsh ⚠ 配置写入失败，请手动编辑 vdsh.yaml", file=sys.stderr)
+        warn("配置写入失败，请手动编辑 vdsh.yaml")
     return remote
 
 
@@ -343,12 +343,11 @@ def run_sync(sync_args, settings):
     vdsh.yaml 的 sync.remote，仍缺失则报用法错误（2）。
     """
     if not SYNC_PS1.is_file():
-        print("vdsh ⚠ 同步脚本缺失: %s" % SYNC_PS1, file=sys.stderr)
+        warn("同步脚本缺失: %s" % SYNC_PS1)
         return SYNC_NOT_SETUP
     if not _has_utf8_bom(SYNC_PS1):
-        print("vdsh ✗ 同步脚本编码异常：%s 缺少 UTF-8 BOM（Windows PowerShell 5.1 需要，"
-              "否则中文乱码、全线解析失败）。请以 UTF-8 with BOM 重新保存该文件。" % SYNC_PS1,
-              file=sys.stderr)
+        fail("同步脚本编码异常：%s 缺少 UTF-8 BOM（Windows PowerShell 5.1 需要，"
+             "否则中文乱码、全线解析失败）。请以 UTF-8 with BOM 重新保存该文件。" % SYNC_PS1)
         return 1
 
     sub = sync_args[0].lower() if sync_args else ""
@@ -363,9 +362,8 @@ def run_sync(sync_args, settings):
             else:
                 url = settings["sync"]["remote"]
                 if not url:
-                    print("vdsh ✗ 缺少远程地址。用法: vdsh sync init <远程URL>"
-                          "（或在 vdsh.yaml 配置 sync.remote；交互终端可无参运行进入配置向导）",
-                          file=sys.stderr)
+                    fail("缺少远程地址。用法: vdsh sync init <远程URL>"
+                         "（或在 vdsh.yaml 配置 sync.remote；交互终端可无参运行进入配置向导）")
                     return 2
         sync_args = ["init", url]
 
@@ -376,12 +374,12 @@ def run_sync(sync_args, settings):
         try:
             return run_child_progress(command, MESSAGES[sub], env=env, timeout=timeout)
         except OSError as error:
-            print("vdsh ⚠ 无法启动同步脚本（%s）" % error, file=sys.stderr)
+            fail("无法启动同步脚本（%s）" % error)
             return 1
     try:
         return subprocess.call(command, env=env)
     except OSError as error:
-        print("vdsh ⚠ 无法启动同步脚本（%s）" % error, file=sys.stderr)
+        fail("无法启动同步脚本（%s）" % error)
         return 1
 
 
@@ -389,16 +387,17 @@ def auto_sync_pull(settings):
     """启动服务前的自动数据拉取（--sync 开启）。
 
     任何结果都不阻塞启动：0 成功；4 未初始化（静默提示一句）；3 被阻塞 / 其它失败告警。
+    同步结果本身由 sync-dsh.ps1 打印（它自带 →/✓/⚠/✗ 与耗时）；这里只报启动侧结论。
     """
     code = run_sync(["pull"], settings)
     if code == SYNC_OK:
-        print("vdsh · 数据已同步。")
+        step("数据已同步")
     elif code == SYNC_NOT_SETUP:
-        print("vdsh · 未检测到数据同步仓库，跳过（需先执行 vdsh sync init <远程URL>）")
+        step("跳过同步：未配置同步仓库（vdsh sync init <远程URL>）")
     elif code == SYNC_BLOCKED:
-        print("vdsh ⚠ 数据同步被阻塞（见上方提示）；继续启动。")
+        warn("同步被阻塞（见上方提示），继续启动")
     else:
-        print("vdsh ⚠ 数据同步失败（退出码 %d）；继续启动。" % code)
+        warn("同步失败（exit %d，见上方提示），继续启动" % code)
 
 
 def run(argv, settings):

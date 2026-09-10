@@ -5,12 +5,12 @@
 非 TTY 自动静默，流式输出不受影响。经锁 + 暂停事件与主线程（子进程行输出）
 协作，动画行与数据行互不覆盖。
 
-子进程输出分流（`run_child_progress`）：
-  - `collect`：把每一行交给调用方（TTY/非 TTY 都生效），用于事后判别与结果汇总；
-  - `quiet`：调用方判定「低价值行」（pnpm 的进度/重试/统计行等）；TTY 下折叠不打印，
-    可顺带把该行编译成新的转轮文案，让进度显示在动画行里；
-  - `replay_on_failure`：折叠行进入环形缓冲，子进程非 0 退出时原样补打，
-    保证「输出瘦身」永不吞掉失败证据；非 TTY 恒为全量透传（日志/CI 友好）。
+子进程输出分流（`run_child_progress`），三个去向由调用方的 quiet 回调决定：
+  - 原样打印：真错误/未知输出一律保留；
+  - 静默折叠：统计行、成功回执等噪声；
+  - 归一化进度行（`→ …`）：把噪声翻译成一句人读的进度，转轮文案保持「任务性质」不变。
+  `collect` 把每一行交给调用方（TTY/非 TTY 都生效）；`replay_on_failure` 让折叠行在
+  子进程非 0 退出时原样补打，保证「输出瘦身」永不吞掉失败证据；非 TTY 恒为全量透传。
 """
 
 import collections
@@ -18,6 +18,8 @@ import subprocess
 import sys
 import threading
 import time
+
+from .console import warn
 
 # 动画全局默认（app 启动时经 configure() 用 vdsh.yaml 覆盖）。
 _FPS = 8
@@ -161,9 +163,12 @@ def run_child_progress(command, message, cwd=None, env=None, timeout=None,
     返回子进程退出码；KeyboardInterrupt（Ctrl+C）时终止子进程并重抛。
 
     collect：可选 list，逐行追加已 rstrip 的输出（TTY 与非 TTY 都收集）。
-    quiet：可选 callable(line) -> str | None，逐行调用（可带计数副作用）：
-        返回 None = 该行照常打印；返回字符串 = 「可折叠行」——TTY 下不打印该行，
-        非空字符串同时作为新的转轮文案。非 TTY 下忽略折叠（保持全量透传与日志完整）。
+    quiet：可选 callable(line) -> str | None，逐行调用（可带计数副作用），返回值决定该行去向：
+        None  = 原样打印（真错误/未知输出一律保留）；
+        ""    = 静默折叠（TTY 下不打印）；
+        "文本" = 折叠原行，改打一条归一化进度行（调用方自带 `→ ` 前缀）；打印后转轮文案
+                 **恢复为 message（任务性质）**，不跟着 pnpm 内部计数漂移。
+        非 TTY 忽略折叠（保持全量透传与日志完整），但 quiet 仍会被调用以便计数。
     replay_on_failure：True（默认）时，被折叠的行在子进程非 0 退出后原样补打，
         保证瘦身不吞掉失败证据。
     """
@@ -196,17 +201,15 @@ def run_child_progress(command, message, cwd=None, env=None, timeout=None,
             text = line.rstrip("\r\n")
             if collect is not None:
                 collect.append(text)
-            if quiet is None:
-                spinner.say(text)
-                continue
-            hint = quiet(text)  # 始终调用：便于调用方计数（副作用），非 TTY 只是不折叠
+            hint = None if quiet is None else quiet(text)  # 始终调用：计数副作用
             if hint is None or not (_QUIET and spinner.enabled):
                 spinner.say(text)
                 continue
             if folded is not None:
                 folded.append(text)
             if hint:
-                spinner.set_message(hint)
+                spinner.say(hint)             # 归一化进度行（→ …）
+                spinner.set_message(message)  # 转轮回到任务性质，不显示 pnpm 内部计数
     except KeyboardInterrupt:
         # Windows 控制台的 Ctrl+C 会发给整个控制台进程组（子进程同样收到）；
         # 这里兜底确保子进程（树）终止，避免残留。
@@ -220,12 +223,12 @@ def run_child_progress(command, message, cwd=None, env=None, timeout=None,
     proc.wait()
     spinner.finish()
     if timed_out["value"]:
-        print("vdsh ⚠ 超过 %s 秒未完成，已终止（远端可能不可达）。" % timeout)
+        warn("超过 %s 秒未完成，已终止（远端可能不可达）" % timeout)
         return 1
     code = proc.returncode
     if code != 0 and folded:
         # 失败时补打被折叠行：瘦身只针对成功路径，排查信息一条不丢。
-        print("vdsh ⚠ 已折叠的子进程输出（%d 行，供排查）：" % len(folded))
+        warn("已折叠的子进程输出（%d 行，供排查）：" % len(folded))
         for line in folded:
             print(line)
     return code

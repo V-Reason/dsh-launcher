@@ -376,13 +376,3 @@ def diff_plugins(before, after):
     unchanged = sorted(name for name in new
                        if name in old and old[name]["identity"] == new[name]["identity"])
     return updated, added, removed, unchanged
-
-
-def activation_summary(state):
-    """生效方式计数文案：`profile 层 4 · 预设挂载 1`。"""
-    counts = {}
-    for plugin in state.get("plugins", []):
-        counts[plugin["activation"]] = counts.get(plugin["activation"], 0) + 1
-    parts = ["%s %d" % (key, counts[key])
-             for key in (ACT_BUNDLE, ACT_PRESET, ACT_PLAIN, ACT_INACTIVE) if counts.get(key)]
-    return " · ".join(parts) if parts else "无"

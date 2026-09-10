@@ -23,6 +23,7 @@ import os
 import re
 import shutil
 import subprocess
+import time
 
 from .. import profile_state
 from .. import settings as settings_mod
@@ -33,100 +34,14 @@ from ..config import (
     EXIT_ERROR,
     EXIT_USAGE,
 )
-from ..console import ask, die, fail, step, warn
+from ..console import ask, die, fail, ok, progress, step, warn
+from ..pnpm_log import Noise, has_network_failure
 from ..spinner import run_child_progress
 
 NAME = "update"
 SUMMARY = "更新 DSH 或插件（update dsh | update plugin）"
 
 PROFILE_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
-
-ANSI_RE = re.compile(r"\x1b\[[0-9;]*[A-Za-z]")
-
-# pnpm 低价值输出（TTY 折叠；非 TTY 全量透传）：(规则, 种类)
-PNPM_QUIET_RULES = (
-    (re.compile(r"^Progress:\s+resolved\s+(\d+),\s+reused\s+(\d+)"), "progress"),
-    (re.compile(r"^\[WARN\]\s+(GET|HEAD|POST)\s+\S+\s+error\s+\(.+?\)\..*retries?\s+left\."), "retry"),
-    (re.compile(r"^\[WARN\]\s+Issues with peer dependencies found"), "peers"),
-    (re.compile(r"^Packages:\s*[-+]\d"), "stats"),
-    (re.compile(r"^[-+]{2,}$"), "bar"),
-    (re.compile(r"^Already up to date$"), "noop"),
-    (re.compile(r"^Done in \S+ using pnpm"), "done"),
-    (re.compile(r"^✓\s+Lockfile\b.*passes supply-chain policies"), "supply"),
-)
-
-# pnpm 网络类硬失败指纹：命中则按网络原因提示（退出码语义不变）。
-PNPM_NETFAIL_RE = re.compile(
-    r"ERR_PNPM_[A-Z_]*(?:FETCH|NETWORK|TIMEOUT)[A-Z_]*"
-    r"|Seems like you have internet connection issues"
-)
-
-
-class _PnpmNoise:
-    """折叠 pnpm 低价值行：统计计数 + 生成转轮文案 + 结果行尾注。
-
-    作为 `quiet` 回调传给 run_child_progress：返回 None = 该行照常打印；
-    返回字符串 = 折叠该行（仅 TTY），非空字符串同时作为新的转轮文案。
-    """
-
-    def __init__(self):
-        self.resolved = 0
-        self.reused = 0
-        self.retries = 0
-        self.peers = False
-        self.supply_chain = False
-        self.observed = False  # 是否看到过 pnpm 的运行标记（证明 pnpm 真的跑了）
-
-    def __call__(self, line):
-        clean = ANSI_RE.sub("", line).strip()
-        for pattern, kind in PNPM_QUIET_RULES:
-            match = pattern.match(clean)
-            if match is None:
-                continue
-            self.observed = True
-            if kind == "progress":
-                self.resolved = int(match.group(1))
-                self.reused = int(match.group(2))
-                return self._progress_hint()
-            if kind == "retry":
-                self.retries += 1
-                return self._progress_hint()
-            if kind == "peers":
-                self.peers = True
-                return ""  # 折叠（空串 = 不改转轮文案，进度行信息量更大）
-            if kind == "supply":
-                self.supply_chain = True
-            return ""
-        return None
-
-    def _progress_hint(self):
-        parts = ["已解析 %d" % self.resolved]
-        if self.reused:
-            parts.append("复用 %d" % self.reused)
-        if self.retries:
-            parts.append("网络重试 %d" % self.retries)
-        return " · ".join(parts)
-
-    def hint(self):
-        """结果行尾注：只列实际发生的项，无命中则空串（不额外加噪）。"""
-        parts = []
-        if not self.observed:
-            # dsh plugin 退出码 0 却没有任何 pnpm 运行标记：更新可能根本没执行，
-            # 此时「已确认为最新」只说明状态没变，必须说清楚（不判失败）。
-            parts.append("未见 pnpm 运行标记（更新可能未真正执行，可用 vdsh doctor 复核）")
-        if self.retries:
-            parts.append("网络重试 %d 次（GitHub 探测失败→回退 git 解析，非错误）" % self.retries)
-        if self.peers:
-            parts.append("缺 peer 提示（profile 设计预期；pnpm peers check 看明细）")
-        return "；".join(parts)
-
-
-def _has_network_failure(lines):
-    """子进程输出里是否命中网络类失败指纹。"""
-    for line in lines or ():
-        if PNPM_NETFAIL_RE.search(ANSI_RE.sub("", line)):
-            return True
-    return False
 
 
 def _usage():
@@ -167,8 +82,8 @@ def _confirm_still_updated():
     status = launch_mod.probe_harness()
     if status == "idle":
         return True
-    warn("检测到 dsh web 正在运行（%s）；更新前请先停止服务——Windows 下文件可能被锁定，"
-         "且新版需重启才生效。" % status)
+    warn("dsh web 正在运行（%s）：更新前请先停止服务（文件可能被锁定，且新版需重启才生效）"
+         % status)
     answer = ask("仍要继续更新？[y/N] ", default="n")
     return (answer or "n").strip().lower() in ("y", "yes")
 
@@ -192,7 +107,7 @@ def _update_dsh(settings):
     code, dirty = _git_quiet(repo, "status", "--porcelain")
     if code == 0 and dirty:
         lines = dirty.splitlines()
-        warn("仓库有 %d 个未提交改动（如 %s …）；更新可能冲突或覆盖本地改动。"
+        warn("仓库有 %d 个未提交改动（如 %s …）：更新可能冲突或覆盖本地改动"
              % (len(lines), lines[0].strip()))
         answer = ask("仍要继续更新？[y/N] ", default="n")
         if (answer or "n").strip().lower() not in ("y", "yes"):
@@ -200,7 +115,8 @@ def _update_dsh(settings):
             return 0
 
     old_version = _version_of(repo)
-    code = run_child_progress(["git", "fetch", "origin"], "获取远端更新…", cwd=repo)
+    started = time.monotonic()
+    code = run_child_progress(["git", "fetch", "origin"], "获取远端更新", cwd=repo)
     if code != 0:
         die("获取远端更新失败（git fetch origin）：请确认网络与远端可达。", EXIT_ERROR)
 
@@ -218,52 +134,63 @@ def _update_dsh(settings):
         if match:
             ahead, behind = int(match.group(1)), int(match.group(2))
     if behind == 0:
-        step("dsh 已是最新（%s）%s" % (old_version,
-                                       ("；本地领先 %d 提交（可 git push）" % ahead) if ahead else ""))
+        ok("dsh 已是最新（%s）" % old_version)
+        if ahead:
+            step("本地领先 %d 个提交（可 git push）" % ahead)
+        step("用时 %s" % _format_duration(time.monotonic() - started))
         return 0
 
-    step("远端更新: %d 个提交" % behind)
+    progress("远端更新 %d 个提交" % behind)
     if ahead > 0:
-        step("仓库本地另有 %d 个提交，将常规合并；冲突需手动处理。" % ahead)
+        progress("本地另有 %d 个提交（常规合并，冲突需手动处理）" % ahead)
         code = run_child_progress(
             ["git", "merge", "-m", "vdsh: sync 远端更新", upstream],
-            "合并远端更新…", cwd=repo)
+            "合并远端更新", cwd=repo)
     else:
         code = run_child_progress(
             ["git", "merge", "--ff-only", upstream],
-            "合并远端更新…", cwd=repo)
+            "合并远端更新", cwd=repo)
     if code != 0:
         die("合并远端更新失败：请检查冲突（git status）后重试，或手动 git pull。", EXIT_ERROR)
 
     new_version = _version_of(repo)
-    step("版本: %s → %s" % (old_version,
-                            new_version if new_version != old_version else "（未变）"))
+    progress("版本 %s → %s" % (old_version,
+                               new_version if new_version != old_version else "（未变）"))
 
     pnpm = shutil.which("pnpm")
     if pnpm is None:
         die("未找到 pnpm（请安装 pnpm 并加入 PATH）", EXIT_DEPS)
-    noise = _PnpmNoise()
+    noise = Noise()
     lines = []
-    code = run_child_progress([pnpm, "install"], "安装依赖…", cwd=repo,
+    code = run_child_progress([pnpm, "install"], "安装依赖", cwd=repo,
                               collect=lines, quiet=noise)
     if code != 0:
-        tail = "；疑似网络不可达（可配置 HTTPS_PROXY 或稍后重试，见 doc/usage.md）" \
-            if _has_network_failure(lines) else "；请手动重试。"
-        die("pnpm install 失败（exit code %d）%s" % (code, tail), EXIT_ERROR)
-    if noise.observed and noise.hint():
-        step("pnpm：%s" % noise.hint())
+        tail = "，疑似网络不可达（可配置 HTTPS_PROXY 或稍后重试）" \
+            if has_network_failure(lines) else "，请手动重试"
+        die("pnpm install 失败（exit code %d%s）" % (code, tail), EXIT_ERROR)
 
     from . import build as build_feature
     build_feature.run_build(repo)  # 失败时内部 die(EXIT_BUILD)
 
-    step("dsh 已更新完成（%s）" % new_version)
-    warn("dsh web 需重启后生效（停止旧实例后重新 vdsh 启动）")
+    ok("dsh 已更新（%s）" % new_version)
+    step("用时 %s" % _format_duration(time.monotonic() - started))
+    warn("重启 dsh web 后生效")
     return 0
 
 
-def _plugin_result_line(updated, added, removed, unchanged, after, noise):
-    """一行结论：更新了什么 + 每个插件的生效方式 + pnpm 噪声尾注。"""
-    total = len(after["plugins"])
+def _format_duration(seconds):
+    """人类可读耗时：46.2s / 1m46s / 1h02m。"""
+    if seconds < 60:
+        return "%.1fs" % seconds
+    minutes, rest = divmod(int(round(seconds)), 60)
+    if minutes < 60:
+        return "%dm%02ds" % (minutes, rest)
+    hours, minutes = divmod(minutes, 60)
+    return "%dh%02dm" % (hours, minutes)
+
+
+def _plugin_result_line(updated, added, removed, unchanged, after):
+    """一句结论：更新了什么 / 是否已是最新（耗时由调用方单独一行打印）。"""
     if updated:
         shown = updated[:3]
         detail = "、".join("%s %s→%s" % (name, old, new) for name, old, new in shown)
@@ -280,12 +207,8 @@ def _plugin_result_line(updated, added, removed, unchanged, after, noise):
             bits.append("移除 %s" % "、".join(removed))
         head = "插件清单已变化：%s" % "；".join(bits)
     else:
-        head = "插件已确认为最新：%d 个依赖的解析与 lockfile、磁盘三方一致" % total
-    line = "%s；生效方式：%s" % (head, profile_state.activation_summary(after))
-    hint = noise.hint()
-    if hint:
-        line += "｜pnpm：" + hint
-    return line
+        head = "插件已是最新（%d 个依赖校验通过）" % len(after["plugins"])
+    return head
 
 
 def _update_plugin(settings, profile):
@@ -318,22 +241,29 @@ def _update_plugin(settings, profile):
     if not os.path.isfile(cli):
         die("未找到 dsh CLI 产物（%s），请先执行 vdsh build" % cli, EXIT_BUILD)
 
-    step("更新 %d 个插件依赖（%s）…" % (len(before["plugins"]), profile_dir))
-    noise = _PnpmNoise()
+    step("更新 %d 个插件依赖（profiles/%s）…" % (len(before["plugins"]), profile))
+    noise = Noise()
     lines = []
+    started = time.monotonic()
     code = run_child_progress(
         [node, cli, "plugin", "--profile", profile, "update", "--latest"],
-        "更新插件…", collect=lines, quiet=noise)
+        "更新插件", collect=lines, quiet=noise)
+    duration = _format_duration(time.monotonic() - started)
     if code == 127:
         die("未找到 pnpm（dsh plugin 报错）：请安装 pnpm 并加入 PATH", EXIT_DEPS)
     if code != 0:
-        tail = "；疑似网络不可达（可配置 HTTPS_PROXY 或稍后重试，见 doc/usage.md）" \
-            if _has_network_failure(lines) else "；查看上方 pnpm 输出"
-        die("插件更新失败（exit code %d）%s" % (code, tail), EXIT_ERROR)
+        tail = "，疑似网络不可达（可配置 HTTPS_PROXY 或稍后重试）" \
+            if has_network_failure(lines) else "，见上方 pnpm 输出"
+        die("插件更新失败（exit code %d%s）" % (code, tail), EXIT_ERROR)
 
     after = profile_state.verify(profile_dir, data_dir=data_dir, repo=repo)
     updated, added, removed, unchanged = profile_state.diff_plugins(before, after)
-    step(_plugin_result_line(updated, added, removed, unchanged, after, noise))
+    ok(_plugin_result_line(updated, added, removed, unchanged, after))
+    step("用时 %s" % duration)
+    if not noise.observed:
+        # dsh plugin 退出码 0 却没有任何 pnpm 运行标记：更新可能根本没执行，
+        # 此时结论只说明状态没变（不判失败，但必须说清楚）。
+        warn("未见 pnpm 运行标记：本次可能未真正执行更新，可用 vdsh doctor 复核")
 
     for text in after["warnings"]:
         warn(text)
@@ -342,7 +272,7 @@ def _update_plugin(settings, profile):
             fail(text)
         die("插件更新后校验未通过（见上）：请处理后再重启 dsh web", EXIT_ERROR)
 
-    warn("重启 dsh web 后生效；记得 vdsh sync push 让副机同步（profiles/%s 在同步范围内）" % profile)
+    warn("重启 dsh web 后生效")
     return 0
 
 

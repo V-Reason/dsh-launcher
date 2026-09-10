@@ -144,7 +144,7 @@ launcher:                                # 启动行为
 animation:                               # TTY 转轮动画（重定向/非 TTY 自动静默）
   fps: 8                                 # 帧率（1-60）
   frames: "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"          # 帧序列（任意非空字符串）
-  quiet: true                            # true = TTY 下折叠 pnpm 的低价值行（进度/重试/统计），进度显示在转轮上；false = 全量输出（排障用）；非 TTY 恒为全量
+  quiet: true                            # true = TTY 下折叠 pnpm 低价值行（进度/重试/统计）并改打「→ …」进度行，转轮只显示当前任务与秒数；false = 全量输出（排障用）；非 TTY 恒为全量
 sync:                                    # DSH 数据同步（vdsh sync / --sync；详见 dsh-data-git-sync/docs/native-git-sync.md）
   data_dir: ""                           # 数据目录（支持 ~，如 ~/.dsh）；空 = DSH_HOME → ~/.dsh
   remote: ""                             # 默认远端；vdsh sync init 无参时使用（init / remote set 成功后也会写入）

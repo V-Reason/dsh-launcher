@@ -11,7 +11,6 @@ import re
 import shutil
 import socket
 import subprocess
-import sys
 import time
 import uuid
 from pathlib import Path
@@ -41,7 +40,7 @@ from ..config import (
     WEB_URL_LOG,
     WORKSPACE_CREATE_ENDPOINT,
 )
-from ..console import die, say, step, warn
+from ..console import die, ok, step, warn
 from ..module_fallback import heal_module_fallback
 from ..spinner import Spinner
 
@@ -419,7 +418,7 @@ def _open_existing(workspace_path, tailnet, want_browser, ready=None):
     authed_url = (ready or {}).get("authed_url")
     if want_browser:
         open_url(authed_url or URL)
-    say("vdsh · 已在运行 → %s" % URL)
+    ok("dsh web 已在运行 → %s" % URL)
     # 只在围栏明确拒绝（403）时告警：实例可能本就带 --trusted-host（如 tailnet
     # 来自 vdsh.yaml），无条件告警是假警报；探测失败/未知则保持安静。
     if tailnet is not None and tailnet_is_trusted(tailnet) is False:
@@ -427,21 +426,23 @@ def _open_existing(workspace_path, tailnet, want_browser, ready=None):
              "请关闭后重启（vdsh --tailnet %s）" % tailnet)
 
 
-def _open_launched(tailnet, want_browser, ready):
+def _open_launched(tailnet, want_browser, ready, started=None):
     authed_url = ready.get("authed_url")
     if want_browser:
         open_url(authed_url or URL)  # 打开带 token 的认证 URL（浏览器首访换 cookie）
-    say("vdsh · 就绪 → %s" % URL)
+    ok("dsh web 就绪 → %s" % URL)
+    if started is not None:
+        step("用时 %.1fs" % (time.monotonic() - started))
     if tailnet is not None:
         token = _token_of(authed_url)
         if token:
-            say("vdsh · 手机访问 → https://%s/?token=%s" % (tailnet, token))
+            step("手机访问 → https://%s/?token=%s" % (tailnet, token))
         else:
-            say("vdsh · 手机访问 → https://%s/" % tailnet)
+            step("手机访问 → https://%s/" % tailnet)
     else:
         lan_url = ready.get("lan_url")
         if lan_url:
-            say("vdsh · 手机访问 → %s" % lan_url)
+            step("手机访问 → %s" % lan_url)
 
 
 def run(argv, settings):
@@ -455,8 +456,7 @@ def run(argv, settings):
         # DSH_REPO 显式设置时尊重环境变量，不覆盖。
         probed = settings_mod.probe_repo()
         if probed and not os.environ.get("DSH_REPO"):
-            warn("配置的 Harness 仓库不存在（%s）；探测到本机仓库 %s，已写入 vdsh.yaml 并继续。"
-                 % (repo, probed))
+            warn("配置的仓库不存在（%s），已改用本机仓库 %s 并写回 vdsh.yaml" % (repo, probed))
             ok_write, _config_warnings = settings_mod.patch_values(
                 {("launcher", "repo"): probed})
             if not ok_write:
@@ -488,8 +488,8 @@ def run(argv, settings):
                 ready = {"authed_url": auth_url, "session": session,
                          "lan_url": _lan_url_from_log(WEB_URL_LOG)}
             else:
-                warn("运行中的实例启用了浏览器认证；若页面提示认证，"
-                     "请从 DSH 控制台窗口（或 %s）打印的 URL 重新打开" % WEB_URL_LOG)
+                warn("运行中的实例启用了浏览器认证：请用 DSH 控制台打印的 URL 打开（日志 %s）"
+                     % WEB_URL_LOG)
         _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"], ready)
         return 0
     if status == "starting":
@@ -500,7 +500,7 @@ def run(argv, settings):
         found = wait_until_ready(
             deadline=launcher_cfg["starting_budget_seconds"],
             gap=STARTING_WAIT_GAP,
-            spinner_message="检测到实例启动中，请稍候…",
+            spinner_message="等待实例就绪",
             log_path=WEB_URL_LOG,
             on_ready=lambda r: _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"], r),
         )
@@ -531,20 +531,20 @@ def run(argv, settings):
     data_dir = settings_mod.effective_data_dir(settings) or os.path.expanduser("~/.dsh")
     healed = heal_module_fallback(data_dir)
     if healed > 0:
-        warn("已清理 %d 个同步污染回退条目（.dsh-module-fallback 下的真实目录/文件，"
-             "dsh 启动时将自动重建）" % healed)
+        warn("已清理 %d 个同步污染的回退条目（dsh 启动时会自动重建）" % healed)
 
     patch_path = ensure_seed_patch() if launcher_cfg["workspace_seed"] else None
+    started = time.monotonic()
     proc = spawn_server(repo, workspace_path, patch_path, tailnet)
-    step("启动中 · %s" % workspace_path)
+    step("启动 dsh web（工作区 %s）" % workspace_path)
     try:
         ready = wait_until_ready(
             deadline=launcher_cfg["startup_timeout_seconds"],
             gap=launcher_cfg["poll_gap_seconds"],
-            spinner_message="服务启动中，请稍候…",
+            spinner_message="启动 dsh web",
             log_path=WEB_URL_LOG,
             proc=proc,
-            on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r),
+            on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r, started),
         )
     except ServerExitedError as error:
         die(str(error))

@@ -6,13 +6,78 @@
 
 ---
 
-## 2026-09-10：插件更新可信化 + TTY 动画瘦身 + pnpm `[WARN]` 排查
+## 2026-09-10（同日第二波）：全体命令输出对齐同一标准（特殊项特殊处理）
+
+### 1. 背景
+
+上一波把 `vdsh update plugin` 的输出按「转轮=任务性质+秒数、`→`=进度、`vdsh ·`=节点、`vdsh ✓/✗`=结论」重做后，
+用户要求**其它命令也往这个标准靠**，同时明确「特殊项特殊处理」。
+
+### 2. 标准与例外（先定死，再改码）
+
+- **四种元素**：转轮 `⠋ 任务性质 47s`（消息不带 `…`、不写 pnpm 内部计数）、`→ 事实`（进度）、`vdsh · …`（节点/收尾数据）、
+  `vdsh ✓/✗/⚠`（结论）；成功任务的耗时为**独立一行** `vdsh · 用时 1m46s`。解释性长文不进输出（归文档与 `vdsh doctor`）。
+- **例外（特殊项）**：报告类（`config`/`doctor`/`sync status`）用各自报告格式；向导类（首次向导、`setup`、`sync init` 无参、
+  构建/更新前确认）保留人机对话形态；`sync-dsh.ps1` 可脱离 vdsh 独立运行，保留自有文案；`dsh.cmd` 转发壳前缀为 `dsh`；
+  失败诊断（exit code、下一步命令、被折叠行补打）不受简约约束。
+
+### 3. 改动清单
+
+1. **新增 `vdsh/pnpm_log.py`**：把 `update.py` 里的 pnpm 分流逻辑（`ANSI_RE`/`QUIET_RULES`/`Noise`/`has_network_failure`）抽成共享模块，
+   供 `update`（两条 pnpm 路径）与 `build` 复用（原先只有 update 接入了折叠，`pnpm run build` 的 `Done in …`、peer 提示会漏出来）。
+2. **`vdsh/console.py`**：新增 `progress()`（`→` 行）与 `ok()`（`✓` 结论行），与既有 `step/warn/die/fail` 组成完整词表。
+3. **`features/update.py`**：`update dsh` 段对齐——`→ 远端更新 3 个提交`、`→ 本地另有 N 个提交（常规合并…）`、`→ 版本 A → B`、
+   `vdsh ✓ dsh 已更新（版本）` + `vdsh · 用时 …`；转轮消息去掉省略号；确认告警与重启提醒压短。插件段维持上一波形态。
+4. **`features/build.py`**：接入 `Noise`（构建工具输出照常透传，只折叠 pnpm 自身行），转轮消息 `构建`，
+   结束 `vdsh ✓ 构建完成` + `vdsh · 用时 …`（原为 `构建完成。`）。
+5. **`features/launch.py`**：`say("vdsh · …")` 的裸前缀改走 console——就绪/已在运行改为 `vdsh ✓`，手机访问与用时改 `vdsh ·`；
+   转轮消息 `启动 dsh web` / `等待实例就绪`；三处啰嗦告警压短（仓库自愈、认证提示、回退目录清理）。
+6. **`features/sync.py` / `bootstrap.py`**：清掉裸 `print("vdsh …")`（dev.md §3 早就要求走 console），
+   改用 `step/warn/fail`；`sync` 转轮消息去省略号；`auto_sync_pull` 结论改 `step/warn`（同步本身的 `✓/耗时` 由脚本打印，不重复）。
+7. **`features/doctor.py`/`cli.py`/`config.py`**：**不改**——报告类与用法输出属特殊项（doctor 已是 `✓/✗/⚠/—` 体系）。
+8. **文档**：`usage.md` 新增「输出约定与常见告警」一节（四元素表 + 各命令形态 + 例外清单）；`dev.md` §3 把标准写成**编码约定**（约束后续代码）并补 `console.py`/`pnpm_log.py` 目录职责行；本条目。
+
+### 4. 关键决策与取舍
+
+- **标准写进 dev.md §3，而不只是 usage.md**：输出形态是「后续代码要遵守的约束」，放在开发约定里才有约束力；
+  usage.md 只讲用户看到什么。
+- **pnpm 分流抽成独立模块**：build 也需要同一套折叠（`pnpm run build` 同样会打 peer 提示与 `Done in …`）；
+  放 `spinner` 会把 pnpm 语义塞进动画机制层，放 `update` 则要 feature 互相 import。
+- **`sync-dsh.ps1` 不动**（BOM 风险 + 它可独立运行）：脚本保留 `→ 步骤` / `✓ 结论` / `  耗时 2.3s` 自有文案，
+  vdsh 不重复打印结论（否则一次同步出现两个 ✓）。
+- **`vdsh build` 的第三方输出照旧透传**：`vite …`、`> dsh@… build` 是构建工具的真话，折叠它等于隐瞒；只折叠 pnpm 自己的样板行。
+- **报告与向导不强行套格式**：`config`/`doctor`/`sync status` 是读报告，向导是人机对话，套「转轮+结论」反而更难读。
+
+### 5. 验证情况
+
+| 项 | 命令/方法 | 结果 |
+|---|---|---|
+| 编译 | `python -m py_compile`（全量） | 通过 |
+| 输出预览（build） | 假 TTY + 样本 pnpm/构建日志 | `→ 解析 174 · 复用 7` → 构建工具输出原样 → `vdsh ✓ 构建完成` → `vdsh · 用时 2.5s`；`Done in …`/peer 提示被折叠 |
+| 输出预览（update dsh） | stub git/版本/pnpm + 假 TTY | `→ 远端更新 3 个提交` / `→ 版本 0.1.2 → 0.1.3` / `vdsh ✓ dsh 已更新（0.1.3）` / `vdsh · 用时 0.9s` / `vdsh ⚠ 重启 dsh web 后生效` |
+| 输出预览（launch 两条路径） | stub 探测/就绪/RPC | 全新启动：`vdsh · 启动 dsh web（工作区 …）` → `vdsh ✓ dsh web 就绪 → URL` → `vdsh · 用时 …` → `vdsh · 手机访问 → …`；已在运行：`vdsh ✓ dsh web 已在运行 → URL` |
+| 分流用例（5 组） | `%TEMP%\vdsh_spinner_check.py` | 全部通过（改用 `pnpm_log.Noise`；stdout/stderr 同流断言） |
+| profile 校验用例（11 组） | `%TEMP%\vdsh_profile_state_check.py` | 全部通过（未受影响） |
+| 真机只读命令 | `vdsh sync status` / `vdsh config` / `vdsh doctor` | 退出码 0；`sync status` 保持脚本自有格式，doctor 报告格式不变 |
+| 未执行 | `vdsh`（真启动）、`vdsh build`、`vdsh update dsh` 真机 | 需要停服/耗时构建，见 §6 |
+
+### 6. 遗留与后续迭代提示
+
+- `vdsh`（真启动）、`vdsh build`、`vdsh update dsh` 的**真机观感未验**：预览用的是 stub 子进程，实际观感请在真终端各跑一次。
+- `sync-dsh.ps1` 的 `  耗时 2.3s` 与 vdsh 的 `vdsh · 用时 …` 仍是两种写法（脚本独立运行所需）；若日后要求完全统一，需按 dev.md §5.4 的 BOM 流程改脚本。
+- `app.py` / `settings.py` 仍有少量导入期/早期 `print("vdsh …")`（console 尚未可用或刻意不引入依赖），属特殊项。
+
+---
+
+## 2026-09-10：插件更新可信化 + 输出按「进度/节点/结论」重做 + pnpm `[WARN]` 排查
 
 ### 1. 背景
 
 用户跑 `vdsh update plugin` 看到成片 `[WARN]`（`HEAD https://github.com/… error (ECONNRESET/ETIMEDOUT). Will retry in …` 与
-`Issues with peer dependencies found`），怀疑是错误或被吞掉的错误；同时提出两个需求：**（a）要能保证插件「确确实实」被正确更新**，
-**（b）更新时的 TTY 动画要去掉多余无关的说明**。
+`Issues with peer dependencies found`），怀疑是错误或被吞掉的错误；随后提出三个需求：**（a）要能保证插件「确确实实」被正确更新**；
+**（b）更新时的 TTY 动画要去掉多余无关的说明**；**（c）只在乎「当前更新进度」和「是否成功更新」**——第一版实现（折叠噪声 + 长结论行尾注）
+仍不达标：转轮只显示 pnpm 内部计数、结论行塞满解释。最终形态按用户给的视觉约定重做：
+`⠋ 任务名 47s`（任务性质 + 秒数）、`→ …`（进度）、`vdsh · …`（节点）、`vdsh ✓/✗`（结论）。
 
 ### 2. 排查结论（先定性，再改码）
 
@@ -31,22 +96,30 @@
 1. **新增 `vdsh/profile_state.py`**：三重证据校验（`package.json` ↔ `pnpm-lock.yaml` ↔ `node_modules/.modules.yaml` 的
    `hoistedLocations` 解析身份），git 比 commit；生效方式四态（`profile 层`/`预设挂载`/`普通依赖`/`未激活`）；
    硬失败（依赖缺失、声明 bundle 却未激活、lockfile 与磁盘不一致、未记入 lockfile）与告警分级；缺 PyYAML/无 `hoistedLocations` 时降级为告警而非假失败。
-2. **`features/update.py`**：`_update_plugin` 改为前后快照 + 差异（`diff_plugins`），结束只打**一行结论**
-   （更新了什么 / 三方一致 / 生效方式 / pnpm 尾注）；校验失败逐条 `vdsh ✗` + 退出码 1；`pnpm install`（update dsh）同样接入折叠与网络失败提示；
-   旧 `_installed_versions()` 删除（避免两套语义）。另加「pnpm 确实跑了」的旁证：全程没有 pnpm 运行标记时，结论行如实附注
-   「未见 pnpm 运行标记（更新可能未真正执行，可用 vdsh doctor 复核）」，避免把「状态没变」说成「已更新」。
+2. **`features/update.py`**：`_update_plugin` 改为前后快照 + 差异（`diff_plugins`），结束打**两行**——结论
+   （`vdsh ✓ 插件已是最新（5 个依赖校验通过）`；有更新则列 `名字 旧→新`）与耗时（`vdsh · 用时 1m46s`；用户要求耗时单独成行）；
+   校验失败逐条 `vdsh ✗` + 退出码 1；
+   `pnpm install`（update dsh）同样接入折叠与网络失败提示；旧 `_installed_versions()` 删除（避免两套语义）。
+   另加「pnpm 确实跑了」的旁证：全程没有 pnpm 运行标记时补一句 `vdsh ⚠ 未见 pnpm 运行标记…`，避免把「状态没变」说成「已更新」。
 3. **`spinner.py`**：`Spinner.set_message()`（只改转轮文案）；`run_child_progress(..., collect=, quiet=, replay_on_failure=)`——
-   TTY 下折叠低价值行并把进度写进转轮，非 0 退出时把折叠行**原样补打**；非 TTY 恒为全量透传。
-4. **`console.py`**：新增 `fail()`（非致命 `vdsh ✗`，用于一次报多条校验失败）。
-5. **`features/doctor.py`**：profile 段改用 `profile_state.verify()`，逐插件打 `版本/commit · 生效方式`，失败/告警分级，peer 一行指引。
-6. **配置**：新增 `animation.quiet`（默认 true；TTY 折叠 pnpm 低价值行，false = 全量排障用），同步 `DEFAULTS`/`VALIDATORS`/`TEMPLATE`/`config_report`/`app.py` 与 `vdsh.yaml`。
-7. **文档**：`usage.md`（更新校验说明 + `[WARN]` 怎么看 + `github.com:443` 处置 + 配置键）、`experience.md` §7.4/§7.5、本条目、`dev.md` 目录职责表。
+   quiet 回调把子进程输出分成三个去向：**原样打印 / 静默折叠 / 归一化进度行 `→ …`**（打印进度行后转轮文案恢复为任务名，
+   不跟随 pnpm 内部计数漂移）；非 0 退出时把折叠行**原样补打**；非 TTY 恒为全量透传。
+4. **`console.py`**：新增 `fail()`（非致命 `vdsh ✗`）与 `ok()`（结论 `vdsh ✓`）。
+5. **`features/doctor.py`**：profile 段改用 `profile_state.verify()`，逐插件打 `版本/commit · 生效方式`，失败/告警分级，peer 一行指引
+   （结论行不再展开生效方式，明细都收在这里）。
+6. **配置**：新增 `animation.quiet`（默认 true；TTY 折叠 pnpm 低价值行并改打 `→` 进度行，false = 全量排障用），同步 `DEFAULTS`/`VALIDATORS`/`TEMPLATE`/`config_report`/`app.py` 与 `vdsh.yaml`。
+7. **文档**：`usage.md`（输出前缀对照表 + 更新校验 + `[WARN]` 怎么看 + `github.com:443` 处置 + 配置键）、`experience.md` §7.4/§7.5、本条目、`dev.md` 目录职责表。
 
 ### 4. 关键决策与取舍
 
 - **不折叠失败证据**：瘦身只作用于成功路径；任何非 0 退出都把折叠行补打（`replay_on_failure`）。非 TTY 一律全量，保证日志/CI 可回溯。
-- **语义留在功能层**：spinner 只提供机制（`quiet` 回调 / `collect` / 环形缓冲），「什么算噪声」由 `update.py` 的 `_PnpmNoise` 决定（与 dev.md §3 分层一致）。
-- **不新增说明行**：pnpm 噪声的解释折进结果行尾注（`｜pnpm：…`），说明性长文交给文档——直接回应「去掉多余无关的说明」。
+- **语义留在功能层**：spinner 只提供机制（`quiet` 回调 / `collect` / 环形缓冲），「什么算噪声、翻译成什么进度」由 `update.py` 的 `_PnpmNoise` 决定（与 dev.md §3 分层一致）。
+- **输出只有四种东西**（用户给的约定）：`⠋ 任务名 47s` 转轮、`→ …` 进度、`vdsh · …` 节点、`vdsh ✓/✗` 结论。
+  解释性文字一律不进输出——第一版把「网络重试意味着什么」「缺 peer 为什么正常」塞进结论行尾注，被判定为「不明所以的说明」，已全部移到文档 +
+  `vdsh doctor`，结论行只回答「更新了什么 / 是否已是最新 / 用时」。
+- **转轮文案是任务名，不是 pnpm 计数**：进度单独用 `→` 行承载，否则转轮会显示 `已解析 174 · 复用 7` 这类只有作者看得懂的内部计数。
+  为此外层在打印进度行后显式把转轮文案复位（`set_message(message)`）。
+- **进度节流按种类各自计时**（`THROTTLE_SECONDS = 3.0`）：解析进度与网络重试是两种信号，共用一个窗口会让「停滞期的唯一反馈」被挤掉。
 - **不制造新假告警**：`未声明 dsh.bundle` 不判失败也不告警（`dsh-study-buddy` 由预设挂载是合法形态）；「未见引用」仅对插件形状的包做 ⚠；
   降级路径（无 PyYAML / 无 `hoistedLocations`）只 ⚠；doctor 的 peer 指引为信息行（`—`）。
 - **不给 pnpm 加 `--fetch-retries`**：探测失败已被吞掉，多 retry 只增加耗时；也不替用户改网络/代理，只给判别命令与建议。
@@ -59,7 +132,8 @@
 | 编译 | `python -m py_compile`（全量） | 通过 |
 | 入口冒烟 | `python vdsh_launcher.py --help` | 通过 |
 | profile 校验 11 组用例 | 临时脚本（临时目录造最小 profile） | 全部通过：registry 版本变化、**git commit 变化但版本号相同**、未激活→✗、磁盘与 lockfile 不一致→✗、预设挂载不误报、缺失→✗、无引用→仅 ⚠、降级只告警、added/removed、scoped/含 `@` 的键解析 |
-| 动画折叠 5 组用例 | 假 TTY 流 + `python -u` 子进程 | 全部通过：噪声零输出、转轮文案更新、真行保留、失败补打折叠行、非 TTY 全量、无 `quiet` 回调时行为不变、无 pnpm 运行标记时结论行如实说明「更新可能未真正执行」 |
+| 动画/分流 5 组用例 | 假 TTY 流 + `python -u` 子进程 | 全部通过：原始噪声零输出、生成 `→ 解析 …`/`→ 网络重试 N` 进度行、**转轮文案恒为任务名**、重试进度行节流为 1 条、真行保留、失败补打折叠行、非 TTY/`quiet=false` 全量、无 `quiet` 回调时行为不变、无 pnpm 运行标记时 `observed=False` |
+| 端到端输出预览 | `_update_plugin` + 假 TTY + 用用户原始 pnpm 日志当子进程输出 | 终端最终内容恰为 3 行节点/进度/结论（见 §2），转轮期间恒定显示 `⠋ 更新插件 Ns` |
 | doctor | `python vdsh_launcher.py doctor`（不接管道） | 退出码 0；输出 5 个插件的 版本/commit + 生效方式（4 个 profile 层 · 1 个预设挂载）+ peer 指引 |
 | 真机 E2E | `vdsh update plugin`（需先停 dsh web） | **未执行**（本会话的 GUI 就是该实例，见 §6） |
 
@@ -68,7 +142,7 @@
 
 ### 6. 遗留与后续迭代提示
 
-- **真机 `vdsh update plugin` 复跑未做**：需停 dsh web。建议在真终端跑一次并复跑第二次（幂等），确认「一行结论 + 尾注」与转轮进度符合预期。
+- **真机 `vdsh update plugin` 复跑未做**：需停 dsh web。建议在真终端跑一次并复跑第二次（幂等），确认「`→` 进度行 + 结论/耗时两行」的实际观感与转轮秒数。
 - 断网/代理缺失时 `update plugin` 的耗时仍来自 pnpm 探测重试（约 10–20s）；若长期如此，考虑在 vdsh 侧给 `dsh plugin` 传 pnpm 网络参数（本轮故意未做）。
 - `build.py` 的 `pnpm run build` 未接 `quiet`（可能同样打 peer 提示）；如需一致体验，可后续把 `_PnpmNoise` 复用过去。
 - 副机是否同样阻断 `github.com:443` 未验证（本机实测为主）；若副机正常，lockfile 可能被改写为 codeload 解析，注意 `vdsh sync push` 的先后。
@@ -81,7 +155,8 @@ python -m py_compile (Get-ChildItem -Recurse -File -Include *.py -Path .\vdsh).F
 python vdsh_launcher.py --help
 python vdsh_launcher.py doctor          # 不接管道；echo $LASTEXITCODE 应为 0
 python "$env:TEMP\vdsh_profile_state_check.py"   # 11 组校验用例（临时脚本，见 §5）
-python "$env:TEMP\vdsh_spinner_check.py"         # 4 组折叠/补打/透传用例
+python "$env:TEMP\vdsh_spinner_check.py"         # 5 组折叠/进度行/补打/透传用例
+python "$env:TEMP\vdsh_output_preview.py"        # 端到端输出预览（假 TTY + 样本 pnpm 日志）
 # 真机（先停 dsh web）：
 vdsh update plugin
 ```
