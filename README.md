@@ -26,7 +26,8 @@ vdsh --tailnet xxx.ts.net         # 手机经 Tailscale 访问
 vdsh sync push / pull / status    # 收工前推送 / 开工前拉取 / 查看状态
 vdsh sync init [URL]              # 一次性初始化同步仓库（无参 = 交互配置向导，副机接入用）
 vdsh sync remote [set <URL>]      # 查看/设置远端仓库位置
-vdsh update dsh                   # 更新 Harness 本体（git pull + install + build）
+vdsh update dsh                   # 更新 Harness 本体（git pull + install + build；版本变化时自动全量重建）
+vdsh build [--clean]              # 手动构建；--clean = 先清 lib/ 与 tsbuildinfo 再全量重建
 vdsh update plugin [web]          # 更新 profile 插件依赖（update --latest）
 vdsh config                       # 查看生效配置
 vdsh doctor                       # 环境自检
@@ -48,8 +49,8 @@ vdsh doctor                       # 环境自检
 
 | 命令 | 说明 |
 |---|---|
-| `vdsh`（默认） | 启动 dsh web：最小化窗口、就绪检测、工作区注册、打开浏览器 |
-| `vdsh build` | 直接执行仓库构建（问题自动检测亦可），带动画 |
+| `vdsh`（默认） | 启动 dsh web：按需构建（**有证据才问**；答 n 只跳过构建、不取消启动）、最小化窗口、就绪检测、工作区注册、打开浏览器 |
+| `vdsh build` | 直接执行仓库构建（问题自动检测亦可），带动画；失败疑似产物陈旧时自动清缓存重建一次，`--clean` 强制全量重建 |
 | `vdsh sync …` | 进程外原生 Git 同步 DSH 数据（避免插件自指）；动画 + 超时；`init` 无参时交互配置仓库/数据目录/远端。⚠️ 聊天记录文件会同步，但**跨机 UI 可见性已搁置**（DSH 按本机路径组织会话）——见 [doc/demo.md](doc/demo.md) §1 已知限制 |
 | `vdsh update dsh / plugin` | 更新 Harness 本体 / profile 插件依赖（分开执行） |
 | `vdsh config` / `setup` / `doctor` | 配置查看 / 重跑向导 / 环境自检 |

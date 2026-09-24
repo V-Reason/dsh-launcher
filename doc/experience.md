@@ -127,6 +127,7 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 ## 7. 其它
 
 - **就绪标记**：`window.__DSH_BOOT__` 优先、旧标题 `DeepSeek Harness` 兼容回退——改判定时两者都要考虑。0.1.3-alpha.1 起新增**认证 URL 行**通道（`dsh web: <url>`，见 7.1），优先级高于 HTTP 探测。
+- **就绪信号不得假设独占一行**（2026-09-24 教训，见 7.4）：解析 `dsh web:` **一律全文匹配**，不加 `^`/`(?m)` 锚定。每次 DSH 版本更新都可能新增启动期输出，把就绪信号挤到某一行中间。
 - **`--patch` 位置**：必须位于 `web` 之后所有 app 参数**之前**（CLI enablePositionalOptions 会把首个位置参数后的选项透传 app）；`--no-open` 与 `--trusted-host` 的相对顺序有注释说明，不要随意调整。
 - **种子文件**：`workspace-seed.mjs`/`seed.yml` 是生成物（gitignored），`ensure_seed_patch` 幂等重建；改种子内容要同时改 `WORKSPACE_SEED_MJS` 常量（源码内的重建源）。
 - **同步脚本缺省值 = 配置默认值**：`vdsh.yaml` 的 DEFAULTS 与 `sync-dsh.ps1` 的硬编码默认（allowlist/身份/帧串）必须一致——两边是同一套语义的不同入口。
@@ -214,7 +215,40 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 **判定键解析**：`hoistedLocations` 的键不能用 `rsplit('@')`——`dsh-at-file@git+ssh://git@github.com/x.git#sha` 里还有 `@`。
 规则：名字以 `@` 开头（scoped）时取首个 `/` 之后的第一个 `@`，否则取首个 `@`。
 
+### 7.6 就绪信号被「挤进行中间」→ vdsh 空等到超时（2026-09-24，DSH 0.1.7-rc.1）
+
+**现象**：`vdsh` 停在「vdsh · 启动 dsh web（工作区 …）」空等到 180s 超时；而 **dsh 其实早已就绪**
+（`probe_harness()` 返回 `auth`、token 换 cookie 得到 200 + `__DSH_BOOT__`）。Ctrl+C 的堆栈落在
+`launch.py:235 time.sleep(gap)`——即就绪轮询里，不是启动失败。
+
+**根因**：就绪判定唯一依赖日志里的 `dsh web: <认证URL>`，而**解析把它当作独占一行**（旧正则
+`(?m)^\s*dsh web:\s*(\S+)`）。0.1.7-rc.1 起，**只要有任何插件激活失败**，启动审计就会多打一段诊断
+（`packages/boot/app-boot/src/index.ts:873` → `auditStartupEntries`；本条实例是第三方 `dsh-at-file`
+仍在调用已删除的 `ctx.settings.register`），这段输出与相邻输出在 pwsh `*>` 全流重定向下会**并进同一行**：
+
+```text
+… 服务\xe9\x94\x9b?dsh web: http://127.0.0.1:3080/?token=…
+                  ^ 0x3f，前面没有 CR/LF → 行首锚定恒不匹配
+```
+
+同日志还有 PowerShell 文本解码造成的私用区乱码（`U+E187` 等）——**乱码与黏连是两件事**：token 本身完好，
+坏的只是「信号在行内什么位置」。
+
+**判据（三条，30 秒内可定性）**：① 堆栈在 `wait_until_ready` 的 `time.sleep`，说明在轮询而非崩溃；
+② 日志里 `grep dsh web:` 能找到、但 `(?m)^` 锚定取不到 → 一定是位置问题；③ 直接拿该 URL 打
+`GET /?token=…` 得到 200 + `__DSH_BOOT__` → 服务就绪，判定侧有 bug。
+
+**解决**：`_url_line_from_log` 改全文匹配 `r"dsh web:\s*(\S+)"`（每进程只打印一次该信号，无歧义；
+URL 内无空白，黏连前缀不入捕获）；`_lan_url_from_log` 允许 `(LAN:` 与 URL 之间无空格并用非贪婪在 `)`
+截断；新增 `_ready_from_log` 返回 `signal_seen`，`wait_until_ready(timeout_message=…)` 据此给出
+两种超时指引（信号在 → 直接给日志 URL；不在 → 指向日志末尾）。回归固化在 `_check_ready_parse.py`
+（A 节断言旧锚定写法必坏，K 节把实机 910 字节日志逐字节当夹具）。
+
+**副作用/边界**：token 是 **per-process** 的——日志比进程旧时（例如上次退出留下的日志）token 会 401，
+此时**不能**判定「服务没起来」，只能判定「不能自动开浏览器」。这是超时文案要区分 `signal_seen` 的原因。
+
 ## 8. 跨机路径与启动失败检测（2026-09）
+
 
 ### 8.1 硬编码绝对路径：跨机复制 launcher 的「必挂点」
 

@@ -41,7 +41,20 @@ WEB_URL_LOG = Path(tempfile.gettempdir()) / "vdsh-web.log"
 
 CLI_REL = str(Path("apps", "cli", "lib", "bin.js"))
 DIST_REL = str(Path("apps", "web", "dist", "index.html"))
-SRC_DIRS = (str(Path("apps", "cli", "src")), str(Path("apps", "web", "src")))
+# 构建时效判定要看的源码范围：`pnpm run build` 读取的一切——工作区包（apps/packages）、native、
+# vendor、构建脚本 scripts——逐文件取最大 mtime 与产物比较（改前只看 apps/cli/src、apps/web/src
+# 两处，其他包的源码更新一律漏检）。`website/` 有意排除：文档站不参与 `pnpm run build`。
+# 必须排除产物与依赖目录：lib/dist 是构建输出（含进去会让「产物比源码新」恒成立 → 每次启动都提示）；
+# `*.tsbuildinfo` 同理（`tsc -b` 的增量状态，写在仓库根与各包 lib/ 下）。
+SRC_ROOTS = ("apps", "packages", "native", "vendor", "scripts")
+SRC_SKIP_DIRS = frozenset({
+    "node_modules", "lib", "dist", "out", "build", "target", "coverage",
+    ".git", ".turbo", ".cache", ".vite", ".next",
+})
+SRC_SKIP_SUFFIXES = (".tsbuildinfo",)
+# 根级构建输入（不在上面几个根里，但改了同样要重建）：包管理 / TS 工程 / 打包器配置。
+SRC_ROOT_FILES = ("package.json", "pnpm-lock.yaml", "pnpm-workspace.yaml")
+SRC_ROOT_PREFIXES = ("tsconfig", "tsdown.config")
 
 # 构建子进程的完整输出落盘处（固定路径，方便失败时直接复制去查）：构建成功即删除，
 # 失败保留并在 `vdsh ✗` 文案里给出该路径（改前 4000+ 行构建输出只喂给折叠器，失败时无处可查）。
@@ -50,7 +63,13 @@ BUILD_LOG_PATH = Path(tempfile.gettempdir()) / "vdsh-build.log"
 # 失败时复述的构建输出行数（末尾若干行：构建工具的报错都在尾部）。
 BUILD_TAIL_LINES = 15
 
-BUILD_PROMPT = "检测构建产物缺失/源码更新，执行build? [Y/n] "
+# 启动前的构建确认提示：按**原因**区分（产物缺失 vs 产物陈旧），用户才知道自己在同意什么。
+# 未知/无原因时回退 BUILD_PROMPT。键与 `features/build.py` 的 REASON_* 常量对应。
+BUILD_PROMPTS = {
+    "missing": "未找到 dsh 构建产物，立即执行 build? [Y/n] ",
+    "stale": "检测到源码/提交比构建产物新，立即执行 build? [Y/n] ",
+}
+BUILD_PROMPT = "检测构建产物缺失/源码更新，执行 build? [Y/n] "
 
 # ── 就绪轮询预算（插件较多时启动可能超过 1 分钟） ───────────────────────────
 MAX_POLLS = 360

@@ -110,25 +110,40 @@ def is_harness_page(resp):
 # 服务器在 Loader 结算后向 stdout 打印 `dsh web: <认证URL>`（--no-open 也打印）
 # 作为就绪信号；启动器把该行捕获到 WEB_URL_LOG 才能完成认证与就绪判定。
 
-def _url_line_from_log(log_path):
-    """从启动日志提取认证 URL（`dsh web: <url>`，含 ?token=）；未就绪返回 None。"""
+def _read_log(log_path):
+    """启动日志全文；读不到返回 None（解码容错，半个多字节字符不会让读取抛错）。"""
     try:
-        path = Path(log_path)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        return Path(log_path).read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    match = re.search(r"(?m)^\s*dsh web:\s*(\S+)", text)
+
+
+def _url_line_from_log(log_path):
+    """从启动日志提取认证 URL（`dsh web: <url>`，含 ?token=）；未就绪返回 None。
+
+    全文匹配、**不锚定行首**：0.1.7-rc.1 起有插件激活失败时，启动审计的诊断会与
+    就绪信号黏连成一行（2026-09-24 实测：`dsh web:` 紧跟在乱码文本 `…服务?` 之后，
+    见 doc/devlog.md），行首锚定恒不匹配 → 服务其实已就绪，launcher 却空转到超时。
+    每个进程只打印一次该信号，故可在全文内匹配；URL 内不含空白，黏连的前缀不会
+    进入捕获值。
+    """
+    text = _read_log(log_path)
+    if text is None:
+        return None
+    match = re.search(r"dsh web:\s*(\S+)", text)
     return match.group(1) if match else None
 
 
 def _lan_url_from_log(log_path):
-    """提取日志行中的 LAN 认证 URL（`(LAN: <url>)`），供手机端访问；无则 None。"""
-    try:
-        path = Path(log_path)
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
+    """提取日志中的 LAN 认证 URL（`(LAN: <url>)`），供手机端访问；无则 None。
+
+    `LAN:` 后的空格可选：信号与前一行黏连时可能写成 `…?token=…(LAN: …)`。
+    捕获用非贪婪，URL 后紧跟 `)` 或其它内容时在 `)` 处截断。
+    """
+    text = _read_log(log_path)
+    if text is None:
         return None
-    match = re.search(r"\(LAN:\s*(\S+)\)", text)
+    match = re.search(r"\(LAN:\s*(\S+?)\)", text)
     return match.group(1) if match else None
 
 
@@ -186,6 +201,35 @@ def _http_ready():
         return False
 
 
+def _ready_from_log(log_path):
+    """解析启动日志：就绪三元组 + 就绪信号是否已出现。
+
+    返回 (authed_url|None, session|None, lan_url|None, signal_seen)。把「信号一直
+    没出现」（启动还早）与「信号出现过但取不出可用 URL」（输出被黏连/乱码污染）
+    区分开，供调用方选择超时文案；session 仅在本次成功换到 cookie 时非 None。
+    """
+    auth_url = _url_line_from_log(log_path)
+    if auth_url is None:
+        return None, None, None, False
+    session = _auth_session_bootstrap(auth_url)
+    if session is None:
+        return None, None, None, True
+    return auth_url, session, _lan_url_from_log(log_path), True
+
+
+def _timeout_note(signal_seen):
+    """超时告警文案：按「就绪信号是否出现过」给出不同指引（evidence 不同，动作不同）。
+
+    信号出现过 = 服务其实已起来，坏的只是 URL 抓取/校验 → 指向日志里的 URL 行，
+    用户可立即打开；否则才是「可能没启动成功」，指向日志末尾排障。
+    """
+    if signal_seen:
+        return ("已发现 `dsh web:` 就绪信号但 launcher 未能用它完成认证校验；"
+                "请直接从日志 %s 里的该 URL 打开（服务很可能已在运行）" % WEB_URL_LOG)
+    return ("等待超时，日志中没有出现 `dsh web:` 就绪信号；"
+            "请检查日志 %s 末尾确认启动是否失败（如插件加载报错）" % WEB_URL_LOG)
+
+
 def _log_tail(log_path, max_lines=20):
     """日志末段（最近 max_lines 行，去尾部空行）；读不到返回 None。"""
     try:
@@ -196,30 +240,31 @@ def _log_tail(log_path, max_lines=20):
     return "\n".join(lines)
 
 
-def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_path=None, proc=None):
+def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_path=None, proc=None,
+                     timeout_message=None):
     """轮询直到 Harness 就绪；返回就绪信息 dict（或 None=超时）。
 
     ready = {'authed_url': str|None, 'session': Session|None, 'lan_url': str|None}
     log_path 提供时优先等 DSH 进程打印的 `dsh web: <认证URL>` 行——0.1.3-alpha.1
     起该行是平台自身的就绪信号（Loader 结算后才打印），拿到后再经 token→cookie
-    交换校验页面；无 URL 行回退旧式 HTTP 探测（兼容无认证的旧 DSH）。
-    就绪后先停止动画，再调用 on_ready(ready)。
+    交换校验页面；信号尚未出现时回退旧式 HTTP 探测（兼容无认证的旧 DSH），
+    二者取先到者。就绪后先停止动画，再调用 on_ready(ready)。
+    timeout_message 是可选回调 `(signal_seen) -> str`：超时时按「就绪信号出现过但
+    不可用」与「信号一直没出现」给出不同指引（这正是 2026-09-24 那次空等的诊断缺口）。
     """
     spinner = Spinner(spinner_message)
     spinner.start()
     ready = None
+    signal_seen = False
     waited = 0.0
     try:
         while deadline is None or waited < deadline:
             if log_path is not None:
-                auth_url = _url_line_from_log(log_path)
-                if auth_url is not None:
-                    session = _auth_session_bootstrap(auth_url)
-                    if session is not None:
-                        ready = {"authed_url": auth_url, "session": session,
-                                 "lan_url": _lan_url_from_log(log_path)}
-                        break
-                elif _http_ready():
+                auth_url, session, lan_url, signal_seen = _ready_from_log(log_path)
+                if session is not None:
+                    ready = {"authed_url": auth_url, "session": session, "lan_url": lan_url}
+                    break
+                if not signal_seen and _http_ready():
                     ready = {"authed_url": None, "session": None, "lan_url": None}
                     break
             elif _http_ready():
@@ -236,8 +281,11 @@ def wait_until_ready(deadline, gap, spinner_message=None, on_ready=None, log_pat
             waited += gap
     finally:
         spinner.finish()
-    if ready is not None and on_ready is not None:
-        on_ready(ready)
+    if ready is not None:
+        if on_ready is not None:
+            on_ready(ready)
+    elif timeout_message is not None:
+        warn(timeout_message(signal_seen))
     return ready
 
 
@@ -482,11 +530,9 @@ def run(argv, settings):
         # 可完成 cookie 交换后开浏览器并注册工作区；否则退回无认证路径。
         ready = None
         if status == "auth":
-            auth_url = _url_line_from_log(WEB_URL_LOG)
-            session = _auth_session_bootstrap(auth_url) if auth_url else None
+            auth_url, session, lan_url, _seen = _ready_from_log(WEB_URL_LOG)
             if session is not None:
-                ready = {"authed_url": auth_url, "session": session,
-                         "lan_url": _lan_url_from_log(WEB_URL_LOG)}
+                ready = {"authed_url": auth_url, "session": session, "lan_url": lan_url}
             else:
                 warn("运行中的实例启用了浏览器认证：请用 DSH 控制台打印的 URL 打开（日志 %s）"
                      % WEB_URL_LOG)
@@ -503,20 +549,29 @@ def run(argv, settings):
             spinner_message="等待实例就绪",
             log_path=WEB_URL_LOG,
             on_ready=lambda r: _open_existing(workspace_path, tailnet, launcher_cfg["open_browser"], r),
+            timeout_message=lambda seen: _timeout_note(seen),
         )
         if found:
             return 0
-        die("端口 %d 已被占用但未识别为 Harness，请检查后重试" % PORT, EXIT_PORT_BUSY)
+        die("端口 %d 已被占用但未识别为 Harness，请检查后重试（日志 %s）"
+            % (PORT, WEB_URL_LOG), EXIT_PORT_BUSY)
 
     # 全新启动：先做「开工前拉取」（对应日常规则），任何结果都不阻断启动流程。
     if auto_pull:
         sync_feature.auto_sync_pull(settings)
 
-    if build_feature.build_needed(repo):
-        if not build_feature.confirm_build():
-            step("已取消", to_stderr=True)
-            return 0
-        build_feature.run_build(repo)
+    # 构建时效：只有拿到证据（产物缺失 / 基线 HEAD 不一致 / 源码比产物新）才问；
+    # 拒绝构建**不取消启动**——产物齐全时启动本来就是成的（2026-09-23 实测：
+    # 用户没动过 DSH 的检出被误报「源码更新」，答 n 后连启动一起被取消，只能手动
+    # `pnpm dsh web`）。真缺产物时下面那道预检会给出明确指引。
+    reason = build_feature.build_reason(repo)
+    if reason is not None:
+        if build_feature.confirm_build(reason):
+            build_feature.run_build(repo)
+        elif reason == build_feature.REASON_MISSING:
+            warn("已跳过构建（缺少构建产物）：启动很可能失败，需要时运行 vdsh build")
+        else:
+            warn("已跳过构建（产物可能陈旧）：若启动报缺导出/找不到模块，运行 vdsh build --clean")
 
     # 启动前预检：CLI 产物必须存在（缺失时 node 立即崩溃，此前只会空转到超时）。
     cli_bin = os.path.join(repo, CLI_REL)
@@ -545,9 +600,10 @@ def run(argv, settings):
             log_path=WEB_URL_LOG,
             proc=proc,
             on_ready=lambda r: _open_launched(tailnet, launcher_cfg["open_browser"], r, started),
+            timeout_message=lambda seen: _timeout_note(seen),
         )
     except ServerExitedError as error:
         die(str(error))
-    if ready is None:
-        warn("等待超时，服务可能启动失败；请手动打开 %s（DSH 日志: %s）" % (URL, WEB_URL_LOG))
+    # 超时文案由 wait_until_ready 的 timeout_message 回调给出（区分「信号出现过但
+    # 不可用」与「信号一直没出现」，见 _timeout_note）。
     return 0

@@ -6,6 +6,318 @@
 
 ---
 
+## 2026-09-24：DSH 0.1.7-rc.1 后 `dsh web:` 就绪信号不再独占一行 → vdsh 空等到超时
+
+### 1. 背景
+
+用户升级 DSH 到 `0.1.7-rc.1`（仓库 HEAD `46a7f68b09`）后，`vdsh` 启动表现为「dsh 实际已经起来，
+但 launcher 一直在等」，Ctrl+C 才退出：
+
+```text
+PS T:\deepseek-harness> vdsh
+vdsh · 启动 dsh web（工作区 T:\deepseek-harness）
+  File "…\vdsh\features\launch.py", line 235, in wait_until_ready
+    time.sleep(gap)
+KeyboardInterrupt
+```
+
+用户按 `dsh-plugin-migration-guide.md` 提示排查（该指南记录的 0.1.7-rc.1 破坏性变更是
+① 删 `ctx.settings.register` ② 删「目录式预设」）。**两条都不是本次根因**，但指南的价值在于
+解释了「为什么这一版才开始黏连」——见 §2。
+
+### 2. 根因（字节级取证）
+
+launcher 的就绪判定唯一依赖日志里的「认证 URL 行」，用的是**行首锚定**正则：
+
+```python
+re.search(r"(?m)^\s*dsh web:\s*(\S+)", text)   # 旧：launch.py:120
+```
+
+而那次失败的日志（`%TEMP%\vdsh-web.log`，910 字节，15:39:49）里，就绪信号**不在行首**：
+
+```text
+… 服务\xe9\x94\x9b?dsh web: http://127.0.0.1:3080/?token=PhI5iHh9uja1QRnQKBJn-lE03Ag1e3FqOZl0SQcLxYk\r\n
+                  ^ 紧邻 URL 的字节是 `?`(0x3f)，前面没有 CR/LF
+```
+
+| 判据 | 结果 |
+|---|---|
+| 旧锚定正则打该日志 | **None**（抓不到 → 空等 180s） |
+| 非锚定 `dsh web:\s*(\S+)` | 完整 URL（token 43 字符，一字不差） |
+| 该 token 换 cookie | 当时 200 + `__DSH_BOOT__`（服务其实早已就绪）；事后 401（token 是 per-process，旧日志的 token 随进程重启作废——这本身也说明「日志旧于进程」是个需要区分的状态） |
+| `probe_harness()` | `auth`（401 正文含 `dsh web authentication required`，认证闸未变） |
+
+黏连来源：0.1.7-rc.1 的启动审计在**有插件激活失败时**多打一段诊断
+（`packages/boot/app-boot/src/index.ts:873` → `auditStartupEntries`），日志前 8 行正是
+`dsh: warning: 1 entry did not activate` + `dsh-at-file … ctx.settings.register is not a function`
+（profile 里第三方 `dsh-at-file` 仍按 ≤0.1.6 的形状调用已删 API → 整行 failed → 触发审计）。
+该段输出与相邻输出在 pwsh `*>` 全流重定向下并进同一行（复现：`process.stdout.write('B: 无换行')`
++ `console.log('C: …')` → 落盘 `B: 无换行C: …\r\n`）；同日志还可见 PowerShell 文本解码造成的
+私用区乱码（`U+E187` 等）。
+
+**结论**：launcher 的就绪解析假设「信号独占一行」，这个假设在 0.1.3-alpha.1 引入该通道时就存在，
+只是 0.1.7 起才第一次出现黏连源。修复**不依赖** profile 侧插件是否被修好——任何插件失败/任何
+审计输出都可能再次黏连。
+
+### 3. 改动（`vdsh/features/launch.py`）
+
+1. **`_read_log(log_path)`**（新）：读日志的唯一入口，`errors="replace"` 解码（半个多字节字符不再让读取抛错），
+   `_url_line_from_log`/`_lan_url_from_log` 共用（改前两份重复的 try/read）。
+2. **`_url_line_from_log`**：正则去掉 `(?m)^\s*` → `r"dsh web:\s*(\S+)"`。每个进程只打印一次该信号，
+   全文匹配无歧义；URL 内无空白，黏连前缀不入捕获（实测取到完整 43 字符 token）。
+3. **`_lan_url_from_log`**：`r"\(LAN:\s*(\S+?)\)"` —— 空格可选（黏连时写成 `…?token=…(LAN: …)`），
+   非贪婪以在 `)` 处截断。三种形态（紧贴/带空格/无 LAN）实跑一致。
+4. **`_ready_from_log(log_path)`**（新）：返回 `(authed_url, session, lan_url, signal_seen)`，
+   把「信号一直没出现（启动还早）」与「信号出现过但取不出可用 URL（输出被污染）」分开。
+5. **`wait_until_ready(..., timeout_message=)`**（改）：内部改用 `_ready_from_log`；超时时回调
+   `timeout_message(signal_seen)` 给出**不同**指引（信号在 → 直接给日志里的 URL 让用户开；不在 →
+   指向日志末尾排障）。改前超时只有一句泛泛的「服务可能启动失败」，与真正的证据脱节。
+6. **`run()`**：`auth` 已在运行分支同样改用 `_ready_from_log`（拿不到时保持原有告警）；
+   全新启动分支删掉本地超时 `warn`（交给回调），`starting` 分支传同一回调，且超时文案补上日志路径。
+
+### 4. 关键决策与取舍
+
+- **修解析而不是修启动方式**：`spawn_server` 的 pwsh `*>` 重定向**不会**吞掉子进程写出的换行
+  （已实测复现），黏连由上游输出/重定向文本解码造成；改成 Python 直接 spawn node（字节精确但丢独立窗口）
+  属行为变更，收益与风险都不划算，不做。
+- **放宽正则会不会误命中**：理论上日志别处出现 `dsh web:` 字样会被匹配，但①每进程只打印一次；
+  ②捕获值还要过 `_auth_session_bootstrap` 的 200 + `__DSH_BOOT__` 校验，误命中不会造成假就绪。
+- **不做「黏连恢复」的 sticky session**：原始方案里想缓存上一轮成功换到的 cookie 作为「之后解析失败」的
+  兜底，但该分支实际不可达（只要 URL 能解析出来，下一轮必然也能解析出来；URL 解析成功即 break），
+  按「无证据不加机制」删掉，代码保持单路径。
+- **不锚定 ≠ 放弃行概念**：`(LAN: …)` 仍按括号边界解析；token 仍按 `\S+` 取到空白为止。
+- **profile 侧不动**：`dsh-at-file` 报上游（迁移指南 §3 已列为第三方待修）；`dsh-study-buddy` 按 §3B 已修。
+  本次只保证「上游有杂音时 launcher 仍能判就绪」。
+
+### 5. 验证情况
+
+| 项 | 方法 | 结果 |
+|---|---|---|
+| 解析回归 | `python _check_ready_parse.py`（A–K 共 26 断言） | ALL PASS |
+| 夹具真实性 | `FIXTURE_COLLIDED` 与实机失败日志逐字节比对 | 910 == 910 ✓（K 断言） |
+| 旧写法必坏 | 旧正则 × 黏连夹具 | `None`（A 断言固化证据） |
+| 新写法必好 | 新解析 × 黏连夹具 | 完整 URL，token 43 字符 ✓ |
+| 真实日志 | `VDSH_CHECK_LOG=<实机日志>` 跑 H 节 | 取到 URL ✓；token 401 = 日志旧于进程（符合预期） |
+| 端到端联通 | 同一 URL 用 requests 走 `?token=` | 当时 200 + `__DSH_BOOT__`（服务确实就绪） |
+| 语法 | `ast.parse` / py_compile | OK |
+
+### 6. 遗留与后续迭代提示
+
+- **就绪信号不得假设独占一行**（写进 `experience.md`）：这是本次的硬约束，下次再遇到新 DSH 版
+  新增启动输出时直接命中。
+- 「日志旧于进程」无法从日志本身判断（token 是 per-process）：`probe_harness() == "auth"` +
+  token 401 只能判定「不能自动开浏览器」，不能判定「服务没起来」。当前处理是超时文案指向日志
+  让用户自取，未做进一步自动化（要自动化得让 DSH 把 URL 写进固定文件，属平台侧需求）。
+- 若将来 `dsh-at-file` 修好（不再有审计告警），黏连源会消失，但**不要**把锚定加回来——
+  回归证据在 `_check_ready_parse.py` 的 A 节。
+- 本机 `%TEMP%\vdsh-web.log` 每次启动被覆盖：复现/复测要留档就先复制一份（本次夹具即这样取得）。
+
+---
+
+
+
+### 1. 背景
+
+上午的「陈旧产物自愈 + 构建基线」刚落地，用户第一次真机启动就撞上两个问题（原话：「有些问题，我没有动DSH，
+应该是能启动的，而非出错」）：
+
+```text
+PS C:\Users\V.Reason> vdsh
+检测构建产物缺失/源码更新，执行build? [Y/n] n
+vdsh · 已取消
+PS C:\Users\V.Reason> pnpm dsh web          # 手动启动，一切正常
+dsh web: http://127.0.0.1:3080/?token=…
+```
+
+用户**当天刚删库重下并自己构建过**（产物 mtime 20:14–20:15，HEAD 提交时间 09-22 23:25），
+没改过任何源码，却被问「构建产物缺失/源码更新」；答 `n` 之后连启动一起被取消，只能手动 `pnpm dsh web`。
+
+### 2. 根因（两条，都在我上午的改动里）
+
+| 现象 | 根因 | 证据 |
+|---|---|---|
+| 没动过 DSH 却被问「源码更新」 | `build_needed()` 把**基线缺失**直接判为需构建；而用户手动 `pnpm run build` 的检出本来就没有基线（基线只有 vdsh 构建成功才写） | 该检出 `lib/.vdsh-build.json` 不存在；`apps/cli/lib/bin.js` 20:15:38、`apps/web/dist/index.html` 20:15:47 都新于源码（20:12）与 HEAD 提交（09-22 23:25） |
+| 答 `n` 连启动一起取消 | launch 侧写死「拒绝 = `已取消` + `return 0`」，与「产物是否真的不可用」无关 | `vdsh · 已取消`，而同一时刻手动 `pnpm dsh web` 启动完全正常 |
+
+顺带修掉同一函数里的老漏检：源码 mtime 只比对 `apps/cli/src`、`apps/web/src` 两个目录，
+`packages/*/src` 的改动（正是 devlog 上一条里 `SettingsProvider` 那类跨包重命名）判不出来。
+
+### 3. 改动
+
+1. **`vdsh/config.py`**：`SRC_DIRS`（两个 src 目录）→ `SRC_ROOTS`（`apps/`、`packages/`、`native/`、`vendor/`、`scripts/`）
+   + `SRC_SKIP_DIRS`（`node_modules`/`lib`/`dist`/… 必须排除：产物若算进源码，「产物比源码新」永远不成立）
+   + `SRC_SKIP_SUFFIXES`（`*.tsbuildinfo`：`tsc -b` 的增量状态，写在仓库根与各包 `lib/` 下，同样是输出）
+   + `SRC_ROOT_FILES`/`SRC_ROOT_PREFIXES`（根级构建输入：`package.json`/`pnpm-lock.yaml`/`pnpm-workspace.yaml`/`tsconfig*`/`tsdown.config.*`）；
+   `BUILD_PROMPT` 拆成按原因取文案的 `BUILD_PROMPTS`（`missing`/`stale`），保留通用文案作回退。
+2. **`vdsh/features/build.py`**：
+   - 判定改 `build_reason(repo)`（返回 `REASON_MISSING`/`REASON_STALE`/None），按**证据递进**：
+     产物缺失 → 基线 HEAD ≠ 当前 HEAD → 源码 mtime 新于产物 → **都没有就不提示**；
+   - **「有产物、无基线」不再判为需构建**：证据显示产物不旧时顺手写一份 `origin="inferred"` 的基线
+     （与真实构建写的 `origin="build"` 区分），下次启动只比 HEAD；
+   - `build_needed()` 保留为 `build_reason() is not None` 的布尔形式（语义与副作用都在 docstring 里写明）；
+   - `confirm_build(reason)` 按原因选文案；`newest_mtime(root, skip=, skip_suffixes=)` 增加跳过规则，
+     新增 `source_newest_mtime(repo)`（`SRC_ROOTS` + 根级构建输入）。
+3. **`vdsh/features/launch.py`**：拒绝构建**只告警、不取消启动**——产物缺失 → 「已跳过构建（缺少构建产物）：
+   启动很可能失败，需要时运行 vdsh build」，产物陈旧 → 「已跳过构建（产物可能陈旧）：若启动报缺导出/找不到模块，
+   运行 vdsh build --clean」；随后照常走预检/启动（真缺 CLI 产物时预检给「请先执行 vdsh build」）。
+   `confirm_build()` 同时把三种「拒绝」统一成 False：答 n、非交互 EOF、**提示符处 Ctrl+C**（改前 Ctrl+C 会
+   抛 KeyboardInterrupt，`app.main` 无兜底 → traceback）。
+4. **文档**：usage.md（启动一节改「证据递进」，构建基线一条同步）、design.md（状态机注 + 2 条演进决策 + 1 条已知边界）、
+   dev.md（config.py / build.py 行、§5.8 复测清单扩到 H/I/J）。
+5. **`_check_build_retry.py`**（不入库）：H 重写为新语义 + 新增 I（启动侧，替身 `spawn_server`/`wait_until_ready`/`probe_harness`）
+   与 J（`confirm_build` 文案与解析）。
+
+### 4. 关键决策与取舍
+
+- **「未知」不等于「需构建」**：基线缺失只是「vdsh 没构建过」，不是「产物旧了」。改前用「保守起见问一次」换安全，
+  代价是每个手动构建过的检出（含刚重下重建）每次启动都被问——用户视角这就是误报。现在把「保守」换成三条可验证证据。
+- **认账写基线（`origin=inferred`）是有意副作用**：不写的话「无基线」状态永远存在，判定永远是 mtime 级；
+  写了之后判定退化为一次 `git rev-parse` 比较。字段留痕，人工排查时能分辨这行基线不是构建写下的。
+- **源码范围扩到构建读到的所有根**：`apps/`+`packages/`+`native/`+`vendor/`+`scripts/` 全量遍历 + 根级构建输入，
+  实测 7720 个文件约 0.5s（NTFS 热缓存），相对启动的秒级开销可忽略；只收「会被构建读取的目录」需要维护一张
+  与 `pnpm-workspace.yaml`/tsconfig 项目引用同步的表，不如整根遍历 + 排除产物（`lib`/`dist`/`*.tsbuildinfo`）稳。
+  `website/`（文档站）有意排除：不参与 `pnpm run build`。
+- **拒绝构建仍启动**：启动是这条通路的目的，构建只是前置优化；用「能不能跑」（CLI 产物预检、就绪轮询、
+  子进程退出即时反馈）把关，而不是用「有没有构建过」。
+- **不改「空输入 = 同意构建」**：默认值保持 `[Y/n]`（回车即构建），只有明确答 `n` 才跳过。
+
+### 5. 验证情况
+
+| 验证 | 手段 | 结果 |
+|---|---|---|
+| 离线用例（不入库） | `python _check_build_retry.py` + `_fake_pnpm.py`：A–G 原有 30 项 + H 重写 + I 启动侧 + J 文案 | `✓ 全部通过`（61 项） |
+| 关键回归（本次报告的场景） | I1：产物齐全、无基线、源码不旧 → **不提问**且照常 `spawn` | 通过（`answers == []`） |
+| 拒绝不再取消 | I2：产物比源码旧 → 提问；答 `n` → 告警「产物可能陈旧」+ 仍 `spawn` | 通过 |
+| 认账基线 | H：`build_reason()` 返回 None 且写出 `origin=inferred` + 当前 HEAD；判为陈旧时**不写** | 通过 |
+| 扩范围生效 | H：仅 `packages/demo/src` 比产物新 → `REASON_STALE`（老实现漏检）；根级 `tsdown.config.ts` 更新 → `REASON_STALE` | 通过 |
+| 输出不算源码 | H：根级 `README.md`、根/包内 `*.tsbuildinfo`、`apps/cli/lib/**` → 仍为「不提示」（否则刚构建完就说陈旧） | 通过 |
+| 真机只读核对 | `T:\deepseek-harness`：产物 20:15 > 全部构建输入（0 个比产物新）、无基线 → `build_reason` 为 None（**下次 `vdsh` 不再误报**，并就地认账写基线） | 通过 |
+| 编译/冒烟 | `python -m py_compile`（22 文件）、`vdsh --help` | 退出码 0 |
+
+### 6. 遗留与后续
+
+- **认账基线的正确性依赖「产物不比源码旧」**：若用户手动构建后又改了源码却没重建，mtime 判定会提示（符合预期）；
+  但若某工具把源码 mtime 改**旧**（少见），误判方向是「少提示一次」而不是「反复误报」——取舍偏静默。
+- **启动判定多了一次遍历**：`SRC_ROOTS` + 根级输入约 0.5s；若日后仓库膨胀到秒级，可先比 HEAD（命中即跳过遍历）
+  或改用 `git status --porcelain` 的脏文件列表。
+- **`pnpm run clean` 清掉基线后仍会按证据重判**：清过缓存但没重建时产物仍在（clean 删的就是产物，故此时通常判 `missing`），
+  两者一致，无需额外状态。
+- 上一轮遗留（未复现「增量构建为何漏刷 `lib/`」、指纹表随打包器措辞维护、`--clean` 无耗时预估）仍然有效。
+
+### 7. 需要一并复测的既有行为（改的是启动主通路的判定分支）
+
+`vdsh`（端口空闲，产物齐全、无基线）→ 不再提问、直接启动；`vdsh`（真的改过 `apps/` 或 `packages/` 源码）→ 提问，
+回车构建；`vdsh build` / `--clean` / `--no-retry` 行为不变；`vdsh update dsh`（版本变化清缓存、失败诊断）不变；
+`vdsh doctor`/`config`/`sync` 不经 build 判定，不受影响。
+
+---
+
+## 2026-09-23：构建失败自动清缓存重建 + 构建基线（第三波的「不可复原」根因找到了）
+
+### 1. 背景
+
+用户跑 `vdsh update dsh` 失败，随后**手动 `pnpm install && pnpm run build` 同样失败**，
+最终只能**删库重下载**才恢复；`vdsh build` 重跑也是同样的报错。
+
+报错两次都指向 `lib/` 产物与源码不同步（均为 tsdown 的 `MISSING_EXPORT`）：
+
+```
+[MISSING_EXPORT] "removeLinkProjections" is not exported by "../../packages/boot/app-boot/lib/index.js".
+[MISSING_EXPORT] "sanitizeProfile" is not exported by "../../packages/boot/app-boot/lib/index.js".
+[MISSING_EXPORT] "SettingsProvider" is not exported by "../settings/src/index.ts".
+```
+
+### 2. 根因（这次有证据，补上第三波的遗留）
+
+| 取证 | 方法 | 结果 |
+|---|---|---|
+| 缺导出的符号在源码里是否存在 | 读 `packages/boot/app-boot/src/index.ts` | **都在**（`sanitizeProfile` 21 行、`removeLinkProjections` 57 行，分别自 2026-09-16 / 09-19 提交）→ 报错的不是源码，而是 `lib/index.js` 是旧产物 |
+| `SettingsProvider` 为什么没了 | 全仓 grep + `git log -S` | 2026-09-21 提交 `601d6761e4` 把 `SettingsProvider` 改成 `SettingsForms`（现在只有 `packages/settings/settings/src/index.ts:223`）；旧 `apps/desktop/lib/types/*` 仍导入前身 |
+| 失败入口属于谁 | 报错里的 `lib/types/project-manager.js` | `apps/desktop`（其 `tsdown.config.ts` 以 `lib/types/main.js` 为入口、`clean: false` **从不删产物**），即增量构建没重刷 |
+| 为什么手动 `pnpm run build` 也救不回 | 读根 `package.json` + `scripts/build.ts` | `build` = `build:native-system → build:lib → build:web`，**不含清缓存**；`pnpm run clean`（`tsx scripts/clean.ts`）才是删 `lib/`+`*.tsbuildinfo` 的那条路 |
+| 为什么删库重下就好了 | 现有检出复测（用户重下后） | `apps/desktop/lib/types/project-manager.js` 已是新内容、不再引用 settings；全量重建即恢复到一致状态 |
+| 清缓存会删掉什么 | 静态核对 `scripts/clean.ts` 的删除集合（跟着根 `tsconfig.json` → `tsconfig.host/client.json` → `apps/desktop/tsconfig.host.json` 的项目引用图走） | 只删各包 `lib/`（`outDir` 以 `/types` 结尾时取其父目录）与 `*.tsbuildinfo`，外加 `apps/desktop/lib`；**不碰** `apps/web/dist`、`node_modules`、工作区数据 |
+
+**结论**：`git pull` 跨版本更新后，仓库的**增量**构建可能不重刷 `lib/`，于是打包器读到与 `src/`
+不一致的旧产物；`pnpm run build` 又不清缓存，所以重跑、手跑都没用——**「删库重下」是当时唯一的出路**。
+这正好解释了第三波「真实失败原因不可复原」：当时的现场日志里只有结尾 15 行，看不到「产物旧于源码」这一层。
+
+附带查出启动侧的同类隐患：`build_needed()` 只比对 `apps/cli/src`、`apps/web/src` 的 mtime，
+**任何其他包**（如 `packages/boot/app-boot`）的源码更新都不会触发构建提示，会带着陈旧产物启动。
+
+### 3. 改动清单
+
+1. **`vdsh/features/build.py`（核心）**
+   - `looks_like_stale_output(lines, start=0)` + `STALE_OUTPUT_RE`：陈旧产物指纹
+     （`MISSING_EXPORT` / `is not exported by` / `MISSING_IMPORT` / `Cannot find module '<…>/lib|types/…>` /
+     `ERR_MODULE_NOT_FOUND` / `Could not resolve "<…>/lib|types/…>`）。只针对**第一次尝试**的输出判定
+     （`start`），避免把重建阶段的真实报错误判成陈旧产物；普通 TS 类型错误不匹配。
+   - `clean_build()`：跑 `pnpm run clean`；清不掉只 `vdsh ⚠` 告警并继续重建（不 `die`）。
+   - `run_build(..., clean=False, retry_on_stale=True)`：失败且命中指纹 → 告警 + **清缓存重建一次**；
+     `clean=True`（`--clean`、`update dsh` 的版本变更路径）直接全量且不再二次重试；
+     两次尝试的输出累积进同一份 `%TEMP%\vdsh-build.log`。
+   - `_report_build_failure(..., cleaned, clean_ok)`：清过缓存就不再让用户清一次；清失败时如实说
+     「清缓存未能执行」，两条路径都不再给改前那条**已证明无效**的 `pnpm install && pnpm run build`。
+   - **构建基线**：成功后写 `lib/.vdsh-build.json`（HEAD sha + 时间 + 版本）。`_read_stamp` 区分
+     **缺失**（从未成功构建 → 需构建）与**损坏**（构建过但基线坏了 → 回退 mtime 判定）；`build_needed()`
+     增加「基线 HEAD ≠ 当前 HEAD（`git pull`/切分支/reset 后）→ 需构建」，非 git 检出仍回退 mtime，不比改前更容易漏检。
+   - `run()`：新增 `vdsh build --clean`（强制全量）与 `--no-retry`（只跑一次），未知参数仍 `EXIT_USAGE`。
+2. **`vdsh/features/update.py`**：merge 后**版本号变化**即提示并走 `clean=True`（跨版本就是陈旧产物的高发场景，
+   省掉「先失败再清」的一轮浪费）；版本未变仍走增量 + 自动重试兜底。
+3. **`vdsh/features/build.py` 模块 docstring** 补机制说明（该文件 docstring 是既定约定）。
+4. `_pnpm_command(pnpm, *args)`：pnpm 允许是路径（补 `run`）或完整命令列表（测试注入解释器+脚本）。
+
+### 4. 关键决策与取舍
+
+- **用仓库自带的 `pnpm run clean` 而不是自己删目录**：它由仓库维护、按项目引用图精确删除，
+  并会拒绝越界/含未知文件的目录；先静态核对删除集合才敢把它写进失败恢复路径。
+- **指纹触发而非无条件全量**：全量重建在本机是数分钟级，日常增量只要秒级；普通源码错误
+  （TS 类型错误）不该白等一次全量。`update dsh` 仅在**版本号变化**时提前全量。
+- **只重试一次**：陈旧产物清一遍就该一致；第二次仍失败必是真实错误，再清只是浪费时间。
+- **基线放在 `lib/` 里**（`lib/.vdsh-build.json`）：与产物同生共死——`pnpm run clean` 清掉它等于
+  「基线未知」，下次启动照旧提示构建，天然自洽；不用额外状态目录。
+- **基线损坏 ≠ 需构建**：否则写坏一次就会每次启动都提示。缺失才判需构建。
+- **不猜「为什么增量构建漏刷」**：本次只保证「不管什么原因，vdsh 能自愈」；
+  仓库侧 `tsc -b`/tsdown 的增量行为不归 launcher 改（见 §6 遗留）。
+
+### 5. 验证情况
+
+- **离线复测 30 项全过**（`python _check_build_retry.py`，临时脚本不入库，假 pnpm 驱动 + 临时 git 仓库）：
+  A 陈旧产物 → `build/clean/build` 后成功、写基线、成功即删日志；B 普通报错不触发清缓存且诊断给
+  `pnpm run clean && pnpm run build`；C 清缓存失败仍重建、且不谎称「已清缓存」；D 清后将仍失败 →
+  退出码 3 + 完整日志 + 「实为真实构建失败」；E 命令起不来 → 退出码 4；F `--clean` 单次全量（clean 在 build 前）；
+  G `--no-retry` 只跑一次、未知参数退出码 2；H 基线四态（缺失/匹配/HEAD 变化/损坏回退 mtime）。
+- `python -m py_compile` 全量 21 文件通过；`python vdsh_launcher.py --help` 冒烟通过；
+  `vdsh build --bogus` 退出码 2。
+- **真机只读核对**：当前检出产物齐全、无基线 → `build_needed()` 为 True（首次启动会提示一次构建，
+  这正是期望行为：无基线 = 构建状态未经验证）；真实报错样本命中指纹、普通 TS 错误不命中。
+- 开发过程本身也踩到并修掉三处测试与实现的真缺陷：清缓存失败把「已清缓存」事实抹掉、
+  损坏基线仍拿 `None` 比 HEAD 导致每次启动提示、`_pnpm_command` 列表形式漏掉 `run` 子命令。
+
+### 6. 遗留与后续迭代提示
+
+- **没有复现「增量构建为什么漏刷 `lib/`」**：本机没能稳定重现（同一检出重跑是正常的）。
+  常见嫌疑是 `tsc -b` 的 `*.tsbuildinfo` 与产物不同步（如构建被中断、或跨版本 merge 后
+  增量状态未失效）。用户侧已不再需要追究——vdsh 会自愈——但若将来有人能稳定复现，
+  值得回报给 Harness 仓库（`scripts/build.ts`、各包 `tsdown.config.ts` 的 `clean: false`）。
+- **全量重建的耗时还不透明**：`--clean` 目前只播报「耗时更长」，没有预估；若要更准，
+  可在 `vdsh doctor` 里加一项「上次构建方式（增量/全量）+ 基线 HEAD 是否等于当前 HEAD」。
+- **测试脚本仍留在 `%TEMP%`/工作区**（`_check_build_retry.py`、`_fake_pnpm.py`，均已 gitignore）：
+  若要长期保留，按 dev.md §5 的约定收进复测清单（当前是「不入库」）。
+- **`vdsh build` 的指纹表需要随工具升级维护**：若 rolldown/tsdown 改了 `MISSING_EXPORT` 的措辞，
+  重试就不会触发（退化为改前的行为，不会更糟）；新措辞出现时按 `STALE_OUTPUT_RE` 补一条。
+
+### 7. 复测清单（回归用）
+
+1. `python _check_build_retry.py`（假 pnpm，秒级）——A–H 八组必须全绿。
+2. `python -m py_compile` 全量 + `python vdsh_launcher.py --help`。
+3. 真机只读：`build_needed(仓库)` 在无基线时为 True；`vdsh build`（幂等，增量）成功且写出 `lib/.vdsh-build.json`，
+   再次调用 `build_needed` 变 False。
+4. 故障演练（可选、需真机）：故意把某包 `lib/index.js` 回退成缺导出的旧内容 → `vdsh build` 应
+   自动 `clean` + 重建一次并成功。
+
+---
+
 ## 2026-09-10（第三波）：`vdsh update dsh` 构建失败「无证据」修复
 
 ### 1. 背景

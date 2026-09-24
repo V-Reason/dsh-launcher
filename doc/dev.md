@@ -18,8 +18,7 @@
 | `vdsh_launcher.py` | 入口薄壳 | 几乎不动；只做 sys.path 与 `from vdsh.app import main` |
 | `vdsh/app.py` | 分发器、首启接线 | 新功能在注册表加行，不在此堆逻辑 |
 | `vdsh/settings.py` | vdsh.yaml 全部语义 | **TEMPLATE 与 DEFAULTS/VALIDATORS 需同步改**；模板是 raw 字符串，首行不能以 `\` 开头 |
-| `vdsh/config.py` | 常量 | 退出码新增在此 |
-| `vdsh/config.py` | 常量 | 退出码新增在此；**构建日志路径 `BUILD_LOG_PATH`（`%TEMP%\vdsh-build.log`）与 `BUILD_TAIL_LINES` 也在此** |
+| `vdsh/config.py` | 常量 | 退出码、**构建日志路径 `BUILD_LOG_PATH`（`%TEMP%\vdsh-build.log`）与 `BUILD_TAIL_LINES`**、构建确认文案 `BUILD_PROMPTS`（按原因）、时效判定的源码范围 `SRC_ROOTS`/`SRC_SKIP_DIRS` 都集中在此（改范围只改这里） |
 | `vdsh/bootstrap.py` | 向导 | 与 `features/setup.py` 共用；提问接受逻辑在此 |
 | `vdsh/spinner.py` | 动画/子进程 | `configure()` 在 app 启动时设置全局（含 `animation.quiet`）；`run_child_progress(collect=, quiet=, tail_out=, replay_on_failure=)` 是「子进程输出分流」的唯一入口：quiet 的三个去向 = 原样打印 / 静默折叠 / 归一化进度行 `→ …`（打印后把转轮文案复位为任务名），`tail_out` 额外收集**含折叠行**的完整行序（失败复述用，传了它就由调用方负责呈现、本函数不再补打折叠行）；折叠只针对成功路径，失败必补打（走 stderr），非 TTY 恒全量；**读循环由独立线程 + 队列驱动，收尾判据是「进程已退出（`proc.poll()`）就取走队列已有行」，不是等 EOF**（管道 EOF 与进程退出无时序保证，等 EOF 会永久挂住）、另有 `reader_done + 未完成任务数` 快路径与 `STALL_SECONDS`（600s 零输出）兜底；`_release_stream` 读线程 `join(2s)` 未退出就不 close（避免 close 卡死在缓冲区锁上）；命令起不来返回 `EXIT_SPAWN_FAILED(127)` 而非抛 traceback；新增超时/参数导出注意线程安全（见 experience.md §9） |
 | `vdsh/console.py` | 输出标准的唯一出口 | `step`（节点）/`ok`（✓）/`fail`（✗ 不退出）/`die`（✗ 退出）/`warn`（⚠）/`progress`（`→`）；**新代码不要裸 print 或手写前缀**；输出形态约定见 dev.md §3 |
@@ -28,7 +27,8 @@
 | `vdsh/module_fallback.py` | 模块回退目录自愈 | 纯标准库；判定必须与 app-boot `ensureSymlink` 对齐（链接/proxy 保留，其余删除）；launch 与 dsh_cli 双通道调用；data_dir 缺省 `~/.dsh` |
 | `vdsh/features/sync.py` | 同步桥 | 退出码透传语义 0-4 不能变；`init` 无参（TTY）= 配置向导（repo/data_dir/remote 校验并写 vdsh.yaml）；同步脚本是 `dsh-data-git-sync/sync-dsh.ps1` |
 | `dsh_cli.py` | 官方 CLI 转发壳（dsh.cmd 调用） | 纯标准库；按 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES` 解析并转发 node；不写配置 |
-| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例；**「有/无内容」类 git 判定必须用 `_git_stdout`（只取 stdout）——`_git_quiet` 合并了 stderr，git 的警告会变成「干净仓库凭空有改动」的误判**；构建段传 `code_is_new=True`（失败文案才敢说「代码已更新」） |
+| `vdsh/features/build.py` | 构建（含陈旧产物自愈、构建时效判定） | `run_build(repo, pnpm=, code_is_new=, clean=, retry_on_stale=)` 是唯一入口：失败且 `looks_like_stale_output()` 命中陈旧产物指纹（`MISSING_EXPORT` 类）时 `clean_build()`（`pnpm run clean`）+ 重建一次，**只判第一次尝试的输出**（`start` 参数），普通 TS 错误不触发；`--clean` 单次全量、`--no-retry` 关重试；成功后写 `lib/.vdsh-build.json`（HEAD 基线）。**时效判定用 `build_reason(repo)`（`missing`/`stale`/None），`build_needed()` 只是它的布尔形式**：证据递进 = 产物缺失 → 基线 HEAD ≠ 当前 HEAD → 源码 mtime 新于产物 → **无证据返回 None**；**「有产物、无基线」不再等于需构建**（那正是手动 `pnpm run build` 的检出），无证据时顺手写 `origin=inferred` 的基线（`build_reason` 的**有意副作用**，只写 `lib/` 内那一个文件）；源码范围 = `config.SRC_ROOTS`（`apps`/`packages`/`native`/`vendor`/`scripts`）排除 `SRC_SKIP_DIRS`（`lib`/`dist`/`node_modules`…）与 `SRC_SKIP_SUFFIXES`（`*.tsbuildinfo`），再加根级构建输入 `SRC_ROOT_FILES`/`SRC_ROOT_PREFIXES`（`package.json`/`tsconfig*`/`tsdown.config.*`…）——只看两个 `src` 目录、或把产物算进源码，是改前的两处漏判；`_pnpm_command` 路径形式补 `run`、列表形式（测试注入）不补；指纹表随打包器措辞升级维护 |
+| `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例；**「有/无内容」类 git 判定必须用 `_git_stdout`（只取 stdout）——`_git_quiet` 合并了 stderr，git 的警告会变成「干净仓库凭空有改动」的误判**；构建段传 `code_is_new=True`（失败文案才敢说「代码已更新」），**版本号变化时传 `clean=True`**（跨版本是陈旧产物高发场景） |
 | `dsh-data-git-sync/sync-dsh.ps1` | 同步本体 | **UTF-8 BOM 文件**；任何编辑器保存可能去 BOM（PS 5.1 会按 GBK 误读 → 全文件报错）；`BuiltinIgnoreRules` 里的路径是同步卫生红线（junction 展开入库的坑，见 experience.md §8.5），新排除项进这里而非 `gitignore_extra` |
 
 ## 2. 新增一个功能（5 步）
@@ -115,6 +115,23 @@ tailnet = S.effective_tailnet(cli_value, settings)
    验证 `run_build` 的失败诊断（末尾输出 / 完整日志落盘 / `code_is_new` 文案 / 退出码 3）、成功清理日志、命令缺失退 4；
    临时 git 仓库验证 `_git_stdout` 只取 stdout（对比 `_git_quiet`）；stub `_git_stdout`/`run_child_progress`/`run_build` 验证 `_update_dsh` 的三条判定（已是最新 / 有更新 / 快进失败）。
    真机只读复测：`%TEMP%\vdsh_update_live_check.py`（跳过运行中询问，其余真跑；无远端更新时应 `vdsh ✓ dsh 已是最新` 且退出码 0）。
+8. **陈旧产物自愈与构建时效判定**（2026-09-23 起）：`python _check_build_retry.py`（工作区根，gitignore 不入库；配 `_fake_pnpm.py` 假 pnpm 驱动，纯 Python、无网络、无真实构建）——
+   断言：A 陈旧产物指纹 → `build/clean/build` 后成功、写基线、成功即删日志；B 普通 TS 报错**不触发**清缓存且诊断给 `pnpm run clean && pnpm run build`；
+   C 清缓存失败仍重建且不谎称「已清缓存」；D 清后仍失败 → 退出码 3 + 完整日志 + 「实为真实构建失败」；E 命令起不来 → 退出码 4；
+   F `--clean` 单次全量（clean 在 build 前）；G `--no-retry` 只跑一次、未知参数退出码 2；
+   H `build_reason` 各证据（产物缺失 / HEAD 变化 / 仅 `packages/` 源码更新 / 损坏回退 / **无证据→None 且认账写 `origin=inferred`**、判为陈旧时**不**认账）；
+   I 启动侧（替身 `spawn_server`/`wait_until_ready`/`probe_harness`）：**无证据不提问且照常启动**（回归「没动过 DSH 却被问构建、答 n 连启动一起取消」）、有证据答 n 只告警仍启动；
+   J `confirm_build` 按原因给文案、`回车/y` 同意、`n`/EOF/**Ctrl+C** 拒绝（三者都只是「跳过构建」）。
+   **假 pnpm 必须用「解释器 + 脚本」列表形式**（`run_build` 的 `pnpm` 接受列表）；`B.run` 无 pnpm 注入参数，用例里临时替换 `shutil.which`。
+   替身要点：`confirm_build` 调的是**内置 `input`**，必须替换 `builtins.input`（模块级替身看不到）；替身用完必须还原（`patch_module`/`patch_input` 返回恢复函数）。
+   坑：`cmd` 的多行括号块与 `%ERRORLEVEL%` 组合在本机有「整段不生效」的静默行为——复杂 stub 一律用 Python 驱动，不要写 .cmd。
+9. **就绪信号解析**（2026-09-24 起）：`python _check_ready_parse.py`（工作区根，gitignore 不入库；纯 Python、无网络、无真实启动）——
+   断言：A **旧行首锚定正则对黏连样本必坏**（防止有人把 `^\s*` 加回来）；B 全文匹配在「独立行/黏连行/无信号/文件不存在」四种输入下的结果；
+   C `(LAN: …)` 三种形态（紧贴无空格 / 带空格 / 无 LAN）；D `_ready_from_log` 把「信号未出现」与「信号在但 URL 不可用」分开；
+   E 黏连日志 + 可用会话 → 秒级就绪且 `authed_url` 正确；F 超时回调收到的 `signal_seen`；G 两分支超时文案；
+   H 实机日志（`VDSH_CHECK_LOG=<路径>`，默认 `%TEMP%\vdsh-web.log`）能取到 URL（token 是否过期不算失败）；
+   J token 43 字符 base64url；K 夹具与实机日志逐字节一致。
+   夹具 `FIXTURE_COLLIDED` 是 **2026-09-24 那次失败日志的逐字节复制**（910 字节，含 pwsh 解码产生的 `U+E187` 乱码），别手工「美化」它。
 
 ## 6. 测试与发布流程
 

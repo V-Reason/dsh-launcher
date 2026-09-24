@@ -214,7 +214,13 @@ def _update_dsh(settings):
 
     from . import build as build_feature
     # 失败时内部 die(EXIT_BUILD)；code_is_new=True → 诊断里点明「代码已更新、仅构建未完成」。
-    build_feature.run_build(repo, code_is_new=True)
+    # 跨版本更新（版本号变了）直接全量重建：增量构建在跨版本时可能不重刷 lib/ 产物，
+    # 导致 tsdown MISSING_EXPORT（2026-09-23 实测根因，见 features/build.py 模块说明）；
+    # 版本没变则走增量 + 失败自动清缓存重试（build.run_build 的默认行为）。
+    version_changed = new_version != old_version
+    if version_changed:
+        progress("版本 %s → %s：清缓存全量重建（避免残留旧产物）" % (old_version, new_version))
+    build_feature.run_build(repo, code_is_new=True, clean=version_changed)
 
     ok("dsh 已更新（%s）" % new_version)
     step("用时 %s" % _format_duration(time.monotonic() - started))

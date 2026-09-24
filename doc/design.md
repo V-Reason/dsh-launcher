@@ -87,12 +87,15 @@ PS 5.1 无法解析 YAML，也不引入新依赖。方案：**Python 解析配�
 
 ```
 probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn 最小化 pwsh 窗口 + --patch/--trusted-host/--no-open）
-       │                        └→ 就绪轮询（window.__DSH_BOOT__ 标记）→ 打开浏览器
+       │                        └→ 就绪轮询（日志里的 `dsh web:` 信号 → token 换 cookie 校验；回退 window.__DSH_BOOT__ 标记）→ 打开浏览器
        └─→ ready: 已运行 → RPC 注册工作区 → 打开浏览器（跳过同步/构建）
        └─→ starting: 端口被占但未就绪 → 等待就绪（30s）→ 同上；超时 → 退出码 6
 ```
 
-设计要点：就绪标记用 `__DSH_BOOT__`（品牌无关，0.1.1 标题改版后仍稳定）；服务端 `--no-open` 保证只有 launcher 打开一次浏览器；`--patch` 必须位于任何 app 参数之前（位置参数透传规则）。
+「按需构建」的**按需 = 有证据才问**（产物缺失 / 基线 HEAD 不一致 / 源码比产物新），
+且**答 n 只跳过构建、不取消启动**：启动是这条通路的目的，构建只是它的前置优化。
+
+设计要点：就绪标记用 `__DSH_BOOT__`（品牌无关，0.1.1 标题改版后仍稳定）；服务端 `--no-open` 保证只有 launcher 打开一次浏览器；`--patch` 必须位于任何 app 参数之前（位置参数透传规则）。就绪信号一律**全文匹配、不锚定行首**——0.1.7-rc.1 起插件激活失败会多打审计诊断，把信号挤进某一行中间（见 experience.md §7.6）；解析结果分「信号未出现 / 信号在但 URL 不可用」两态，超时文案据此分叉。
 
 ### 3.5 首次运行引导
 
@@ -127,15 +130,22 @@ probe: idle ──→ 全新启动（--sync 拉取 → 按需构建 → spawn �
 | 聊天记录跨机同步**搁置**（2026-09） | 实测副机数据文件在、UI 不显示：DSH 按**本机工作区绝对路径**组织会话（`sessions/<projectKey(cwd)>/`，见 `session-persistence-jsonl/src/format.ts`；`storages/workspace.json` 的 `tables.workspaces[].path` 也是绝对路径）。跨机路径不同 → 会话目录键与 workspace 注册路径对不上；副机查询按副机 cwd 算键，找不到主力机路径键下的数据。属 DSH 数据模型限制，非同步脚本可修；launcher 侧扁平化/重映射是在给 DSH 未提供的语义打补丁，长期维护成本高 → 搁置（详见 `devlog.md` 第三波、`demo.md` §1 已知限制） |
 | 工作区 RPC 按 `/api/<ns>/<method>` + `args.request` 修正（2026-09） | 原实现用 `/api/workspace.create` + 裸 `payload:{path}`，该形态自 RPC 通道引入起就不存在 → 恒 404 纯文本，被 `resp.json()` 的 `Expecting value…` 掩盖（只有「实例已在运行」才走到这条 RPC，故长期未被发现）。失败诊断同步改为打印 `HTTP <code>：<正文摘要>`，让协议漂移一眼可见 |
 | tailnet 告警改围栏探测（2026-09） | 无条件告警在「tailnet 来自 vdsh.yaml、实例本就带 `--trusted-host`」时是假警报。改用 `Host: <域名>` 打 `/api` 读围栏结果（未声明 → 403，已声明 → 401/404），**仅 403 告警**；探测无需 cookie（围栏先于认证） |
+| 构建时效判定改「证据递进」（2026-09-23） | 基线 HEAD 不一致 / 源码比产物新 / 产物缺失三条证据任一成立才询问；**「有产物、无基线」不再等于需构建**——手动 `pnpm run build` 的检出天然没有基线，一律判需构建会让「什么都没动」的用户每次启动都被问一次（真机实测）。无证据时顺手写 `origin=inferred` 基线，判定成本降到一次 HEAD 比较 |
+| 拒绝构建不取消启动（2026-09-23） | 原来答 `n` 直接 `已取消` 退出（退出码 0），而产物齐全时启动本来是成的（真机实测：用户只能手动 `pnpm dsh web`）。改为按原因告警后继续；真缺产物时后面那道 CLI 产物预检给出明确指引，把关交给「能不能跑」而不是「有没有构建过」 |
+| 就绪信号解析不锚定行首（2026-09-24） | 0.1.7-rc.1 起「有插件激活失败 → 启动审计多打诊断」会让 `dsh web:` 与前一行黏连（实测紧跟在乱码文本后），锚定恒不匹配 → 服务已就绪却空等到超时。解析改全文匹配 + 超时按「信号是否出现过」分叉文案；修 launcher 的判定，而不是等上游插件不再报错——任何诊断都可能再黏连 |
 
 ## 5. 已知边界
 
 - `launcher.port` 不可配置：dsh web 端口未被验证可改，避免虚假开关。
 - 直连 `sync-dsh.ps1` 不读 vdsh.yaml（环境桥只在 vdsh 调用时注入）——文档已注明（usage.md「配置生效范围」）。
 - 构建行为不区分「需要询问」与「强制」：launch 内按需询问、`vdsh build` 直接构建，属有意差异。
+- 构建时效判定是**启发式**：靠 `SRC_ROOTS`（`apps`/`packages`/`native`/`vendor`/`scripts`）+ 根级构建输入的 mtime 遍历
+  （本机 7720 个文件约 0.5s，排除 `lib`/`dist`/`node_modules`/`*.tsbuildinfo`）与基线 HEAD 比较，覆盖不到仓库外因素；
+  mtime 被外部工具改写（解压覆盖、同步工具回写）可能造成一次多余提示——答 n 即可正常启动。
 - `REPO_CANDIDATES`（config.py）是**硬编码候选列表**：换安装位置/机型需追加候选（现含 `C:\deepseek-harness`、`T:\deepseek-harness`）；显式 `DSH_REPO` 优先级始终最高。
 - `vdsh sync init` 无参仅 **TTY** 进交互向导；非 TTY 维持「回退 sync.remote / 用法错误」。向导校验是提示式（不截停），用户可带 URL 直跑绕过。
 - 启动失败检测只覆盖 **launcher 自己拉起的进程**（spawn_server 的句柄）；「starting」分支无句柄，仍是 30s 预算 + 超时提示。
+- 日志里的认证 token 是 **per-process** 的：日志比进程旧（上次退出留下的）时 token 会 401，此时只能判定「不能自动开浏览器」，**不能**判定「服务没起来」——这正是超时要区分「信号出现过与否」的原因。
 - `dsh_cli.py` 与 `sync-dsh.ps1 Get-VdgConfigRemote` 是**两份文本级读取实现**（剥注释 → JSON 反解），须保持同步（同 `patch_values`/`Set-VdgConfigRemote` 约定）。
 - init 的 fetch 失败仍返回 0（「origin 暂不可达，可稍后再试」）；严格失败语义在 pull/push（退出码 1）。
 - **聊天记录跨机同步（已搁置，2026-09 第三波）**：`sessions/` 数据可随仓库同步，但**副机 UI 不显示**——DSH 用工作区绝对路径做会话组织键（目录 `--T-Open-Source-dsh-launcher--` 形如 `projectKey(cwd)`；`workspace.json` 的 `tables.workspaces[].path` 同为绝对路径），路径/盘符不同即对不上。搁置语义：同步机制保留（无危害），不再投入「副机看聊天记录」；恢复时需先解决 DSH 侧路径模型（如下），launcher 不承诺变通：① DSH 支持会话按 workspace id（而非路径）检索；② 或副机将主力机路径重映射（junction/虚拟盘）为相同绝对路径；③ 或 launcher 侧按 session id 聚合（读者自行评估）。

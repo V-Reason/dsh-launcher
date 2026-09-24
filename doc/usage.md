@@ -8,7 +8,7 @@
 vdsh [工作目录]                    启动 dsh web 并打开浏览器（默认功能）
     --tailnet xxx.ts.net          手机经 Tailscale 访问（自动加 --trusted-host）
     --sync                        启动服务前自动拉取 DSH 数据（sync pull）
-vdsh build                         直接执行仓库构建（pnpm run build，带动画）
+vdsh build [--clean] [--no-retry] 直接执行仓库构建（pnpm run build，带动画）
 vdsh sync <子命令>                 数据同步（init/push/pull/status/remote；无参 = 交互菜单）
 vdsh update <dsh | plugin>         更新 Harness 本体 / 更新 profile 插件（分开执行）
 vdsh config                        查看生效配置
@@ -29,11 +29,20 @@ vdsh help / -h / --help          用法
 
 - 服务窗口**最小化启动、不抢焦点**（CREATE_NEW_CONSOLE + SW_SHOWMINNOACTIVE）；点任务栏图标呼出看日志 / Ctrl+C 停止。node 退出后窗口自动关闭。
 - **启动失败即时反馈**：启动前预检 node / CLI 产物（缺失直接报错，不再空转到超时）；子进程在就绪前退出时立即终止并打印日志尾部（用 `dsh web` 直启能看到报错、用 vdsh 却空转等待的问题由此修复）。
-- 就绪判定以页面中的 `window.__DSH_BOOT__` 引导清单为主标记（0.1.1 起标题品牌化，旧标题 `DeepSeek Harness` 仅作兼容回退）。
+- 就绪判定以页面中的 `window.__DSH_BOOT__` 引导清单为主标记（0.1.1 起标题品牌化，旧标题 `DeepSeek Harness` 仅作兼容回退）；新版 DSH 另以日志里的 `dsh web: <认证URL>` 为就绪信号，**该信号按全文匹配**（不要求独占一行，见 experience.md §7.6）。
+- **超时不再是一句泛泛的「启动失败」**：日志里已出现 `dsh web:` 就绪信号却仍超时 → 提示「服务很可能已在运行，直接打开日志里那个 URL」；信号始终没出现 → 提示去日志末尾查启动报错（如插件加载失败）。两种情况都点名日志路径。
 - 浏览器只由启动器在就绪后打开**一次**：服务端以 `--no-open` 关闭其自带自动打开（0.1.1 起 web app 默认自开，会重复）。
 - 工作区种子：经 `--patch <seed.yml>` 注入 `workspace-seed.mjs`（启动器目录下生成），把启动目录幂等注册为 Web UI 工作区；`launcher.workspace_seed: false` 可关闭。
 - 实例已在运行：经 Connection RPC（`/api/workspace/create`）把当前目录注册进该实例（幂等，成功无输出、失败只告警）；**仅在探测到运行实例确实不信任所配 tailnet 域名时**才提示「未带 --trusted-host」（Host 围栏 403 判定，见 experience.md §7.3）。
-- 构建：产物缺失或 `apps/cli/src`、`apps/web/src` 的 mtime 新于产物时，询问 `pnpm run build`；非交互输入（EOF）默认不构建。
+- 构建时效（`build_reason()`，**只在拿到证据时才问**）：
+  - 需构建的三种证据：产物文件缺失；**构建基线（`lib/.vdsh-build.json` 记的 HEAD）与当前 HEAD 不一致**（`git pull`/切分支/`git reset` 之后）；
+    构建读取的源码比产物新——范围是 `apps/`、`packages/`、`native/`、`vendor/`、`scripts/` 与根级构建输入（`package.json`/`pnpm-lock.yaml`/`tsconfig*`/`tsdown.config.*`），
+    排除产物与依赖（`lib`/`dist`/`node_modules`/`*.tsbuildinfo`）。改前只看 `apps/cli/src`、`apps/web/src`，其他包的源码更新会漏检。
+  - **无证据不提示**：产物齐全、源码不新、基线 HEAD 一致 → 直接启动。基线**缺失**（手动 `pnpm run build` 过的检出、刚 `pnpm run clean`、全新检出）
+    也不再一律判为需构建，而是按上面两条查证据；证据显示产物不旧时顺手**认账**写一份基线（`origin: inferred`，与真实构建写的 `origin: build` 区分），下次只比 HEAD。
+    基线**损坏**则回退 mtime 判定，不会每次启动都提示。
+  - 提示按原因区分文案（「未找到 dsh 构建产物」/「检测到源码/提交比构建产物新」）；回车或 `y` 才构建，**答 `n`（或 Ctrl+C、非交互 EOF）只跳过构建、不取消启动**（产物齐全时启动本来是成的，
+    真缺产物时随后的预检会报「未找到 dsh CLI 产物：请先执行 vdsh build」）。
 - 动画：启动就绪、构建、`sync push/pull/init`、`--sync` 共用同一款转轮动画（帧 + 秒数，8fps 默认）；非 TTY/重定向自动静默。经 vdsh 调用同步时，脚本进度（fetch/push 的 git 对象传输、步骤行）逐行流式显示，转轮消息跟随最近一步。
 
 ### 配置（vdsh setup / config）
@@ -103,6 +112,34 @@ vdsh --sync                      # 启动服务前自动 pull（仅实例未运�
 - 退出码语义：`0` 成功 / `1` 硬失败（含 timeout 超时）/ `2` 用法错误 / `3` 被阻塞（脏工作区、冲突、远端 main 未建立）/ `4` 未初始化（可跳过）；`vdsh --sync` 依此只告警、不阻塞启动。
 - 规则：**两台电脑不要同时干活**：A 收工 `push` → B 开工 `pull`；DSH 空闲时再同步。
 
+## 构建（vdsh build）
+
+```powershell
+vdsh build                 # 增量构建（pnpm run build）；失败且疑似产物陈旧时自动清缓存重建一次
+vdsh build --clean         # 全量重建：先 pnpm run clean（删各包 lib/ 与 tsbuildinfo）再构建
+vdsh build --no-retry      # 只跑一次，不做清缓存重试（排障时想看清第一次的真实输出）
+```
+
+- **为什么需要清缓存**：`git pull` 跨版本更新后，仓库的**增量**构建可能不重刷 `lib/` 产物，
+  打包器于是报 `[MISSING_EXPORT] "x" is not exported by ".../lib/index.js"` 这类「导入的东西不存在」。
+  `pnpm run build` 本身**不清缓存**，所以重跑、手跑都没用；改前唯一的出路是删库重下（2026-09 实例，见 devlog）。
+- **自动自愈**：构建失败且输出命中陈旧产物指纹（`MISSING_EXPORT` / `is not exported by` /
+  `Cannot find module '<…>/lib|types/…'` / `ERR_MODULE_NOT_FOUND` 等）时，vdsh 会打
+  `⚠ 疑似 lib/ 产物与源码不同步` 并**自动清缓存重建一次**；只针对第一次尝试的输出判定，
+  普通 TS 类型错误不会触发（不会让你白等一次全量）。
+- **清缓存删什么**：只删各包的 `lib/` 与 `*.tsbuildinfo`（仓库自带 `pnpm run clean`：`tsx scripts/clean.ts`，
+  按项目引用图执行，并拒绝越界/含未知文件的目录）；**不碰** `apps/web/dist`、`node_modules` 与工作区数据。
+  清缓存这一步失败只告警，仍然继续重建（诊断里会如实说明「清缓存未能执行」）。
+- **`vdsh update dsh` 的差异**：版本号发生变化时**直接**清缓存全量重建（跨版本正是陈旧产物的高发场景，
+  省掉「先失败再清」的一轮浪费）；版本未变则走增量 + 自动重试兜底。
+- **构建基线**：成功后写 `lib/.vdsh-build.json`（HEAD + 时间 + 版本 + 来源 `origin`），供启动时的时效判定用；
+  它随 `pnpm run clean` 一起消失——但**消失不等于下次一定提示**：启动侧改为按证据判定
+  （产物在、源码不新、且没有 HEAD 不一致的证据就不问），无证据时顺手认账写一份 `origin: inferred` 的基线。
+  启动侧判定细节见上面「启动（launch，默认功能）」的构建时效一条。
+- **失败时看什么**：末尾 15 行输出 + 完整日志 `%TEMP%\vdsh-build.log`（成功即删，只留最近一次失败现场）+
+  下一步命令。已清过缓存仍失败 → 说明是**真实构建失败**（不是陈旧产物），按报错处理；
+  未清过 → 给可执行的 `pnpm run clean && pnpm run build`。重建前请确认 dsh web 已停止（文件锁会让构建写不进产物）。
+
 ## 更新（vdsh update）
 
 ```powershell
@@ -121,6 +158,8 @@ vdsh update plugin [web]          # 更新 profile 插件依赖（默认 web）�
   - `pnpm run build` 失败 → 补打**末尾 15 行**子进程输出（构建工具的报错都在尾部）+ **完整构建日志路径**
     `%TEMP%\vdsh-build.log`（成功即删，只保留最近一次失败现场），并点明「代码已更新到最新、仅构建未完成」，
     避免把「已拉到新代码但构建没过」误读成「更新没生效」。
+    若失败疑似 `lib/` 产物与源码不同步（跨版本更新后增量构建可能不重刷产物），会**自动清缓存重建一次**，
+    不必删库重下；两次都失败即真实构建失败，诊断会说明这一点。详见上面「构建（vdsh build）」。
   - 命令本身起不来（pnpm 被安全软件拦截/文件被占用）→ `vdsh ✗ 无法启动命令（…）`，不再是 Python traceback；
     子进程退出后若后代进程仍抱着输出句柄不放，10 分钟无输出即按卡死终止（不会永久挂住）。
 - `update plugin` 使用 `update --latest`（忽略 package.json 版本范围，取各插件最新版并回写）；结束后只提示「重启 dsh web 后生效」。
