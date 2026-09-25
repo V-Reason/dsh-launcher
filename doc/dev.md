@@ -27,7 +27,7 @@
 | `vdsh/module_fallback.py` | 模块回退目录自愈 | 纯标准库；判定必须与 app-boot `ensureSymlink` 对齐（链接/proxy 保留，其余删除）；launch 与 dsh_cli 双通道调用；data_dir 缺省 `~/.dsh` |
 | `vdsh/features/sync.py` | 同步桥 | 退出码透传语义 0-4 不能变；`init` 无参（TTY）= 配置向导（repo/data_dir/remote 校验并写 vdsh.yaml）；同步脚本是 `dsh-data-git-sync/sync-dsh.ps1` |
 | `dsh_cli.py` | 官方 CLI 转发壳（dsh.cmd 调用） | 纯标准库；按 DSH_REPO → vdsh.yaml → `REPO_CANDIDATES` 解析并转发 node；不写配置 |
-| `vdsh/features/build.py` | 构建（含陈旧产物自愈、构建时效判定） | `run_build(repo, pnpm=, code_is_new=, clean=, retry_on_stale=)` 是唯一入口：失败且 `looks_like_stale_output()` 命中陈旧产物指纹（`MISSING_EXPORT` 类）时 `clean_build()`（`pnpm run clean`）+ 重建一次，**只判第一次尝试的输出**（`start` 参数），普通 TS 错误不触发；`--clean` 单次全量、`--no-retry` 关重试；成功后写 `lib/.vdsh-build.json`（HEAD 基线）。**时效判定用 `build_reason(repo)`（`missing`/`stale`/None），`build_needed()` 只是它的布尔形式**：证据递进 = 产物缺失 → 基线 HEAD ≠ 当前 HEAD → 源码 mtime 新于产物 → **无证据返回 None**；**「有产物、无基线」不再等于需构建**（那正是手动 `pnpm run build` 的检出），无证据时顺手写 `origin=inferred` 的基线（`build_reason` 的**有意副作用**，只写 `lib/` 内那一个文件）；源码范围 = `config.SRC_ROOTS`（`apps`/`packages`/`native`/`vendor`/`scripts`）排除 `SRC_SKIP_DIRS`（`lib`/`dist`/`node_modules`…）与 `SRC_SKIP_SUFFIXES`（`*.tsbuildinfo`），再加根级构建输入 `SRC_ROOT_FILES`/`SRC_ROOT_PREFIXES`（`package.json`/`tsconfig*`/`tsdown.config.*`…）——只看两个 `src` 目录、或把产物算进源码，是改前的两处漏判；`_pnpm_command` 路径形式补 `run`、列表形式（测试注入）不补；指纹表随打包器措辞升级维护 |
+| `vdsh/features/build.py` | 构建（含陈旧产物自愈、构建时效判定） | `run_build(repo, pnpm=, code_is_new=, clean=, retry_on_stale=)` 是唯一入口：失败且 `looks_like_stale_output()` 命中陈旧产物指纹（`MISSING_EXPORT` 类）时 `clean_build()`（`pnpm run clean`）+ 重建一次，**只判第一次尝试的输出**（`start` 参数），普通 TS 错误不触发；`--clean` 单次全量、`--no-retry` 关重试；成功后写 `lib/.vdsh-build.json`（HEAD 基线）。**时效判定用 `build_reason(repo)`（`missing`/`stale`/None），`build_needed()` 只是它的布尔形式**：证据递进 = 产物缺失 → 基线 HEAD ≠ 当前 HEAD → 源码 mtime 新于产物 → **无证据返回 None**；**「有产物、无基线」不再等于需构建**（那正是手动 `pnpm run build` 的检出），无证据时顺手写 `origin=inferred` 的基线（`build_reason` 的**有意副作用**，只写 `lib/` 内那一个文件）；源码范围 = `config.SRC_ROOTS`（`apps`/`packages`/`native`/`vendor`/`scripts`）排除 `SRC_SKIP_DIRS`（`lib`/`dist`/`node_modules`…）与 `SRC_SKIP_SUFFIXES`（`*.tsbuildinfo`），再加根级构建输入 `SRC_ROOT_FILES`/`SRC_ROOT_PREFIXES`（`package.json`/`tsconfig*`/`tsdown.config.*`…）——只看两个 `src` 目录、或把产物算进源码，是改前的两处漏判；**`_pnpm_command` 两种 pnpm 形式（路径字符串=真机 / argv 列表=复测注入）一律 `args` 原样拼接、不得隐式补 `run`**（2026-09-25 事故：字符串形式补 `run` 撞上调用方传的 `run` → 真机 `pnpm run run build`，见 experience.md §7.7）；失败诊断用 `missing_script()` 对照「请求的脚本 vs pnpm 报缺的脚本」区分拼装错与仓库改名；指纹表随打包器措辞升级维护 |
 | `vdsh/features/update.py` | 更新（dsh/plugin） | git fetch/merge、pnpm 经 `run_child_progress`（`collect` + `quiet=pnpm_log.Noise()`）；插件更新走官方 `dsh plugin` 通路（bundle 重调解），结束用 `profile_state` 校验并打**结论 + 耗时两行**（git 依赖比 commit）；噪声规则在 `vdsh/pnpm_log.py`，新增规则须同步 §5 分流用例；**「有/无内容」类 git 判定必须用 `_git_stdout`（只取 stdout）——`_git_quiet` 合并了 stderr，git 的警告会变成「干净仓库凭空有改动」的误判**；构建段传 `code_is_new=True`（失败文案才敢说「代码已更新」），**版本号变化时传 `clean=True`**（跨版本是陈旧产物高发场景） |
 | `dsh-data-git-sync/sync-dsh.ps1` | 同步本体 | **UTF-8 BOM 文件**；任何编辑器保存可能去 BOM（PS 5.1 会按 GBK 误读 → 全文件报错）；`BuiltinIgnoreRules` 里的路径是同步卫生红线（junction 展开入库的坑，见 experience.md §8.5），新排除项进这里而非 `gitignore_extra` |
 
@@ -123,6 +123,9 @@ tailnet = S.effective_tailnet(cli_value, settings)
    I 启动侧（替身 `spawn_server`/`wait_until_ready`/`probe_harness`）：**无证据不提问且照常启动**（回归「没动过 DSH 却被问构建、答 n 连启动一起取消」）、有证据答 n 只告警仍启动；
    J `confirm_build` 按原因给文案、`回车/y` 同意、`n`/EOF/**Ctrl+C** 拒绝（三者都只是「跳过构建」）。
    **假 pnpm 必须用「解释器 + 脚本」列表形式**（`run_build` 的 `pnpm` 接受列表）；`B.run` 无 pnpm 注入参数，用例里临时替换 `shutil.which`。
+   **注意（2026-09-25 教训）**：这条列表形式**只覆盖离线路径**——真机走的是字符串路径
+   （`shutil.which("pnpm")` → `pnpm.CMD`），两者曾因隐式补 `run` 而行为不同（复测全绿、真机全红，
+   见 experience.md §7.7）。涉及命令拼装的改动，必须同时跑第 10 条（真机形态）。
    替身要点：`confirm_build` 调的是**内置 `input`**，必须替换 `builtins.input`（模块级替身看不到）；替身用完必须还原（`patch_module`/`patch_input` 返回恢复函数）。
    坑：`cmd` 的多行括号块与 `%ERRORLEVEL%` 组合在本机有「整段不生效」的静默行为——复杂 stub 一律用 Python 驱动，不要写 .cmd。
 9. **就绪信号解析**（2026-09-24 起）：`python _check_ready_parse.py`（工作区根，gitignore 不入库；纯 Python、无网络、无真实启动）——
@@ -132,6 +135,18 @@ tailnet = S.effective_tailnet(cli_value, settings)
    H 实机日志（`VDSH_CHECK_LOG=<路径>`，默认 `%TEMP%\vdsh-web.log`）能取到 URL（token 是否过期不算失败）；
    J token 43 字符 base64url；K 夹具与实机日志逐字节一致。
    夹具 `FIXTURE_COLLIDED` 是 **2026-09-24 那次失败日志的逐字节复制**（910 字节，含 pwsh 解码产生的 `U+E187` 乱码），别手工「美化」它。
+10. **pnpm 命令拼装（真机形态）**（2026-09-25 起）：`python _check_build_cmd.py`（工作区根，gitignore 不入库；**需 PATH 里有真 pnpm**）——
+    断言：A `_pnpm_command` 字符串/列表两种形式**同构**且 `run` 恰好一个；B **AST 扫 `build.py` 的每个调用点**，
+    逐个用哨兵前缀核对拼出的 argv（防隐式补全复活、防新调用点写坏）；C 真机 pnpm 语义：
+    `pnpm run run build` 必报 `Missing script: run` + `Command "run" not found.`、`pnpm run build` 正常执行；
+    D **字符串 pnpm 端到端**：真 `pnpm.CMD` + 临时工程的真脚本，走 `run_build` 的增量与 `--clean` 两条路
+    （记录 `npm_lifecycle_event` 核对「哪个脚本真的跑了」）；E `--clean` 路径清缓存失败 → 诊断说
+    「清缓存未能执行」而非把用户指回同一动作；F missing-script 诊断三分支（报缺的是 vdsh 拼的子命令
+    `run` → 判「命令拼装错误」且不给清缓存建议；是请求的脚本或别名字 → 指向 `package.json` 的 scripts，
+    其中别名字（子包/构建脚本内部调用）明确不归咎启动器）。
+    B 节另核对「拼进 pnpm 的子命令 == `PNPM_RUN_VERB`」——诊断常量与调用点不得各自漂移。
+    **反向验证**（改这条路径时照做）：把 `_pnpm_command` 临时还原成「字符串形式补 `run`」，D 必红且诊断
+    点出「命令拼装错误」——用例拦的是原缺陷，不是改过的那一行。
 
 ## 6. 测试与发布流程
 
@@ -145,3 +160,9 @@ tailnet = S.effective_tailnet(cli_value, settings)
 - PS 5.1：`ConvertFrom-Json` 顶层数组不拆管道（需展平一层）；`-File` 读无 BOM UTF-8 会当 GBK；`2>&1 | ForEach {"$_"}` 会把 stderr 变 ErrorRecord 文案。
 - YAML：双引号内 `\` 必须转义；值生成用 `json.dumps` 最稳；raw 字符串开头的 `\` 会变成文件首字符。
 - 沙箱外代码不要依赖「本会话沙箱行为」（taskkill 权限、管道限制）——那是 DSH 沙箱约束，用户环境无此限制。
+- 复测脚本删临时目录**不能**只写 `shutil.rmtree(..., ignore_errors=True)`：Windows 上只读文件（git 的
+  `.git/objects/*`）会让它**静默半途而废**，实测在工作区积了 10 个删不掉的旧目录。用清只读位再重试的 `rmtree()`
+  （见 `_check_build_cmd.py`/`_check_build_retry.py`），并**核对残留清单**而不是信任返回值；
+  早期沙箱 ACL 实验留下的目录（`probe-*`）连枚举都 `WinError 5`，删不掉时如实登记即可。
+- 复测里跑**真 pnpm** 会在**工作区根**建 `.pnpm-store/`（200+ 文件）：用 `pnpm_config_store_dir` 指进 scratch
+  （pnpm 11 只认这个名，`npm_config_store_dir` 与 `--store-dir` 都不认），随 scratch 一起删。

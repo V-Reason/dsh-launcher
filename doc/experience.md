@@ -127,7 +127,8 @@ if ($parsed.Count -eq 1 -and $parsed[0] -is [array]) { $parsed = @($parsed[0]) }
 ## 7. 其它
 
 - **就绪标记**：`window.__DSH_BOOT__` 优先、旧标题 `DeepSeek Harness` 兼容回退——改判定时两者都要考虑。0.1.3-alpha.1 起新增**认证 URL 行**通道（`dsh web: <url>`，见 7.1），优先级高于 HTTP 探测。
-- **就绪信号不得假设独占一行**（2026-09-24 教训，见 7.4）：解析 `dsh web:` **一律全文匹配**，不加 `^`/`(?m)` 锚定。每次 DSH 版本更新都可能新增启动期输出，把就绪信号挤到某一行中间。
+- **就绪信号不得假设独占一行**（2026-09-24 教训，见 7.6）：解析 `dsh web:` **一律全文匹配**，不加 `^`/`(?m)` 锚定。每次 DSH 版本更新都可能新增启动期输出，把就绪信号挤到某一行中间。
+- **复测替身必须与真件同构**（2026-09-25 教训，见 7.7）：注入假命令时，「路径字符串」与「argv 列表」两种形式必须让替身收到**同一个 argv**；只覆盖一种形式等于没覆盖（实测：30+ 断言全绿、真机全红）。有外部工具参与的关键路径，至少留一条**真机端到端**用例。
 - **`--patch` 位置**：必须位于 `web` 之后所有 app 参数**之前**（CLI enablePositionalOptions 会把首个位置参数后的选项透传 app）；`--no-open` 与 `--trusted-host` 的相对顺序有注释说明，不要随意调整。
 - **种子文件**：`workspace-seed.mjs`/`seed.yml` 是生成物（gitignored），`ensure_seed_patch` 幂等重建；改种子内容要同时改 `WORKSPACE_SEED_MJS` 常量（源码内的重建源）。
 - **同步脚本缺省值 = 配置默认值**：`vdsh.yaml` 的 DEFAULTS 与 `sync-dsh.ps1` 的硬编码默认（allowlist/身份/帧串）必须一致——两边是同一套语义的不同入口。
@@ -246,6 +247,48 @@ URL 内无空白，黏连前缀不入捕获）；`_lan_url_from_log` 允许 `(LA
 
 **副作用/边界**：token 是 **per-process** 的——日志比进程旧时（例如上次退出留下的日志）token 会 401，
 此时**不能**判定「服务没起来」，只能判定「不能自动开浏览器」。这是超时文案要区分 `signal_seen` 的原因。
+
+### 7.7 「离线复测全绿、真机全红」：替身与真件不同构（2026-09-25，DSH 0.1.7-rc.2）
+
+**现象**：`vdsh update dsh` 把代码更新到 `0.1.7-rc.2` 后构建段全灭，输出只有两行，翻来覆去：
+
+```text
+[ERR_PNPM_NO_SCRIPT] Missing script: run
+Command "run" not found.
+```
+
+而诊断给的是「可先清缓存再重建…`pnpm run clean && pnpm run build`」——**与现场完全相反**：
+要跑的脚本是 `clean`/`build`，pnpm 却说没有 `run` 脚本，问题根本不在产物或缓存。
+
+**根因（两层，都在 `features/build.py`）**：
+
+1. `_pnpm_command` 在**路径字符串**形式里隐式补一个 `run`（`[pnpm, "run", *args]`），而调用方传的是
+   原样 argv `("run", "build")` → 真机执行 `pnpm run run build`。真机走的正是字符串形式
+   （`shutil.which("pnpm")` → `pnpm.CMD`）；**列表**形式（`[sys.executable, _fake_pnpm.py]`，
+   离线复测唯一注入的形式）不补 `run` → 复测探不到。两种形式行为不同，而只有一种被覆盖。
+2. `run_build` 里 `cleaned = clean and clean_build(...)` 把「**已尝试**清缓存」写成了「清成功」：
+   `--clean` 路径（跨版本更新正是这条）清缓存失败时 `cleaned=False` → 诊断落到「没清过」分支，
+   把用户指回刚刚失败的那个动作。
+
+**判据（一眼定性）**：pnpm 报缺的脚本名如果是 **vdsh 自己拼进去的子命令**（`pnpm run …` 里的
+`run`），那就是命令拼装错——清缓存、重试、查产物全是无效动作。报缺的若是**本次请求的脚本**
+（`build`/`clean`）→ 才是「仓库没有这个脚本」（DSH 改了脚本名 / 检出不对）；若是别名字
+（如构建脚本内部对子包调用报 `Missing script: bundle`）→ 按仓库侧处理，**不要**归咎启动器。
+
+**解决**：① 两种形式同构，`args` 原样拼接，删除隐式补全（`_pnpm_command` 注释写死「不要复活」）；
+② `cleaned` 记「已尝试」；③ 诊断新增 missing-script 指纹（`missing_script` + `PNPM_RUN_VERB`）：
+报缺的正是拼进去的子命令 → 直说「命令拼装错误」并**撤掉**清缓存建议与「dsh web 文件锁」噪声；
+报缺的是请求的脚本或别名字 → 指向仓库 `package.json` 的 scripts，且不诬告启动器。
+
+**回归**：`_check_build_cmd.py`——A 拼装同构、B **AST 扫 `build.py` 每个调用点**（防隐式补全复活或
+新调用点写坏）、C 真机 pnpm 语义（`run run build` 必报 `Missing script: run`）、D **字符串 pnpm 端到端**
+（真 `pnpm.CMD` + 真脚本走 `run_build` 的增量与 `--clean`）、E `cleaned` 语义、F 诊断两分支。
+**反向验证**：把 `_pnpm_command` 还原成旧实现，D 必红且诊断当场点出「命令拼装错误」——守卫拦的是
+原缺陷本身。
+
+**教训**：注入替身时，替身必须收到**与真件相同的 argv**；「假件能跑通」只证明假件与代码自洽。
+对含外部工具（pnpm/git/tsx）的关键路径，至少留一条真机端到端用例——本次那条用例只是「真 pnpm +
+3 行真脚本」，就足以在任何一条替身断言之前把缺陷拦下。
 
 ## 8. 跨机路径与启动失败检测（2026-09）
 

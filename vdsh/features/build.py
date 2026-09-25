@@ -33,6 +33,16 @@ launcher 在启动前完成时效检测并按需构建。
 vendor/scripts）+ 根级构建输入（`package.json`/`pnpm-lock.yaml`/`tsconfig*`/`tsdown.config.*`，
 排除 `*.tsbuildinfo` 这类输出）；
 launch 侧拒绝构建只告警、继续启动（产物真缺失时后面自有明确报错）。
+
+**命令拼装事故（2026-09-24，DSH 0.1.7-rc.2）**：`_pnpm_command` 曾在字符串形式（真机走的
+就是这条：`shutil.which("pnpm")` → `pnpm.CMD`）里自动补一个 `run`，而调用方传的是原样
+argv（`"run", "build"`），真机于是执行 `pnpm run run build` → `[ERR_PNPM_NO_SCRIPT]
+Missing script: run`，跨版本 `vdsh update dsh` 的清缓存与构建**全部失败**；列表形式
+（离线复测注入 `[python, _fake_pnpm.py]`）不补 `run`，所以**复测 30+ 断言全绿、真机全红**。
+现在两种形式同构（`args` 原样拼接，见 `_pnpm_command`），失败诊断另加 missing-script 指纹
+（`missing_script`）：请求 `build`/`clean` 却报缺 `run` → 直说「命令拼装错误」且不再给清缓存
+建议；报缺的恰是请求的脚本 → 提示 DSH 可能改了脚本名。`cleaned` 也改为记「已尝试清缓存」，
+清缓存自身失败时不再把用户指回刚失败的那个动作。
 """
 
 import json
@@ -102,6 +112,28 @@ def looks_like_stale_output(lines, start=0):
         if STALE_OUTPUT_RE.search(line):
             return True
     return False
+
+
+# pnpm 报「没有这个脚本」的两种文案（本机 pnpm 11 实测：`[ERR_PNPM_NO_SCRIPT] Missing script: run`
+# 与 `Command "run" not found.`）。抓出脚本名是为了把三类**完全不同**的原因分开：
+# ① 报缺的是 vdsh 拼进去的子命令（`PNPM_RUN_VERB`）→ 命令拼装缺陷（2026-09-24 的
+#    `pnpm run run build` 即此类）；② 报缺的正是本次请求的脚本 → 仓库改了脚本名；
+# ③ 其余（子包/构建脚本内部的调用）→ 按仓库侧处理，不归咎启动器。
+MISSING_SCRIPT_RE = re.compile(r"Missing script:\s*(\S+)|Command \"([^\"]+)\" not found")
+
+# vdsh 跑仓库脚本用的 pnpm 子命令：`pnpm run <脚本>`。诊断据此判定「拼装把子命令当成了脚本名」
+# ——`pnpm run run build` 时 pnpm 报缺的正是这个 `run`。**必须与调用点写的一致**，
+# 由 `_check_build_cmd.py` 的 B 节（AST 扫描每个调用点的拼装结果）核对。
+PNPM_RUN_VERB = "run"
+
+
+def missing_script(lines):
+    """输出里 pnpm 报「没有这个脚本」时返回脚本名，否则 None（出现多处时取最后一处）。"""
+    found = None
+    for line in lines or ():
+        for match in MISSING_SCRIPT_RE.finditer(line):
+            found = match.group(1) or match.group(2)
+    return found
 
 
 def head_commit(repo):
@@ -309,13 +341,20 @@ def clean_build(repo, pnpm, lines=None):
 
 
 def _pnpm_command(pnpm, *args):
-    """拼一条 pnpm 命令；pnpm 允许是路径（正常）或列表（测试注入解释器+脚本）。
+    """拼一条 pnpm 命令：`<pnpm 可执行文件> <args…>`，`args` **原样**接在后面。
 
-    路径形式要补 `run`（`pnpm run build`）；列表形式已是完整命令前缀，
-    后面直接跟子命令（`<前缀> build`），不能再补 `run`。
+    pnpm 允许是路径（正常：`shutil.which("pnpm")` 给的可执行文件）或 argv 前缀列表
+    （离线复测注入 `[sys.executable, _fake_pnpm.py]`）。两种形式**同构**：调用方写下的
+    就是子进程真正收到的——`_pnpm_command(pnpm, "run", "build")` → `pnpm run build`。
+
+    **2026-09-24 事故（不要复活自动补 `run`）**：本函数曾在字符串形式里补一个 `run`，
+    而调用方按「原样 argv」传 `("run", "build")`，真机于是执行 `pnpm run run build` →
+    `[ERR_PNPM_NO_SCRIPT] Missing script: run`，`vdsh update dsh` 的跨版本构建全部失败。
+    列表形式（离线复测唯一覆盖的形式）不补 `run`，所以**复测全绿、真机全红**：
+    「两种形式行为不同」本身就是缺陷，现由 `_check_build_cmd.py` 固化守卫。
     """
     if isinstance(pnpm, str):
-        return [pnpm, "run", *args]
+        return [pnpm, *args]
     return [*pnpm, *args]
 
 
@@ -343,8 +382,14 @@ def run_build(repo, pnpm=None, code_is_new=False, clean=False, retry_on_stale=Tr
     started = time.monotonic()
     # 失败时**只看末尾几行**（构建工具的真报错都在尾部、且一定没被折叠）：
     # 用 collect 收全量、自己只打末尾，避免「折叠行补打 + tail 复述」把同一批行打两遍。
-    cleaned = clean and clean_build(repo, pnpm, lines)
-    clean_ok = cleaned
+    # `cleaned` 记的是「**已尝试**清缓存」，不是「清成功」：`clean_build` 自己失败时也必须这么记，
+    # 否则诊断会把用户指回刚刚失败的那个动作（2026-09-24 实测：版本变更走 `--clean`，清缓存失败
+    # 被记成「没清过」，于是打出与现场相反的「可先清缓存再重建」，掩盖了真实根因）。
+    cleaned = False
+    clean_ok = False
+    if clean:
+        cleaned = True
+        clean_ok = clean_build(repo, pnpm, lines)
     first_attempt_start = len(lines)
     code = _run_build_once(repo, pnpm, lines, noise)
     spawn_failed = code == EXIT_SPAWN_FAILED
@@ -362,7 +407,8 @@ def run_build(repo, pnpm=None, code_is_new=False, clean=False, retry_on_stale=Tr
     if spawn_failed:
         die("无法启动 pnpm（%s）：请确认可执行且未被安全软件拦截" % pnpm, EXIT_DEPS)
     if code != 0:
-        _report_build_failure(repo, code, lines, code_is_new, cleaned=cleaned, clean_ok=clean_ok)
+        _report_build_failure(repo, code, lines, code_is_new, cleaned=cleaned, clean_ok=clean_ok,
+                              scripts=("clean", "build") if cleaned else ("build",))
         die("构建失败（exit code %d）" % code, EXIT_BUILD)
     _write_stamp(repo)
     _prune_build_log()
@@ -376,14 +422,17 @@ def _run_build_once(repo, pnpm, lines, noise):
                               quiet=noise, collect=lines)
 
 
-def _report_build_failure(repo, code, lines, code_is_new, cleaned=False, clean_ok=False):
+def _report_build_failure(repo, code, lines, code_is_new, cleaned=False, clean_ok=False, scripts=()):
     """失败诊断（不受输出简约约束）：末尾输出 + 完整日志 + 仓库状态说明。
 
     code_is_new：调用方是否刚把检出的代码更新到最新（update dsh 的构建段）——
     决定收尾那句是「代码已更新、仅构建失败」还是纯「构建失败」。
     cleaned / clean_ok：是否已尝试清缓存 / 清缓存是否真的成功——决定下一步给什么
     （已清过就别再让用户清一次；没清过时给可执行的 `pnpm run clean && pnpm run build`，
-    而不是改前那条已证明无效的「pnpm install && pnpm run build」）。
+    而不是改前那条已证明无效的 `pnpm install && pnpm run build`）。
+    scripts：本次**打算跑**的脚本名（正常 `("build",)`，`--clean` 路径 `("clean", "build")`）。
+    与输出里 pnpm 报缺的脚本名对照，把「命令拼装错」与「仓库没有这个脚本」分开——
+    两类的下一步完全相反，混在一起就会给出与现场相反的建议（见 `missing_script`）。
     """
     print("", file=sys.stderr)
     warn("构建输出末尾 %d 行（完整日志见下）：" % min(BUILD_TAIL_LINES, len(lines)))
@@ -397,14 +446,26 @@ def _report_build_failure(repo, code, lines, code_is_new, cleaned=False, clean_o
         warn("构建失败（exit code %d）：上面末尾输出即根因线索" % code)
     if code_is_new:
         warn("仓库代码已更新到最新，仅构建未完成")
-    if cleaned and clean_ok:
+    missing = missing_script(lines)
+    # 只有「报缺的正是 vdsh 拼进去的子命令」才算拼装错——这样既拦得住 2026-09-24 那类缺陷，
+    # 也不会把子包脚本缺失（`tsx scripts/build.ts` 内部的 pnpm 调用）误判成启动器的问题。
+    invocation_defect = missing == PNPM_RUN_VERB and missing not in scripts
+    if invocation_defect:
+        warn("vdsh 请求的是 %s，pnpm 却报没有 `%s` 脚本：**命令拼装错误**（把子命令当成了脚本名，"
+             "启动器缺陷、与仓库无关）——清缓存/重试都无效，请带上这行反馈"
+             % ("、".join("`%s`" % name for name in scripts) or "（未知脚本）", missing))
+    elif missing:
+        warn("仓库没有 `%s` 脚本（pnpm: Missing script）：请核对 %s 的 package.json scripts"
+             "（若该调用来自子包或构建脚本内部，则与 vdsh 无关）" % (missing, repo))
+    elif cleaned and clean_ok:
         warn("已清理构建产物并重建仍未通过：属真实构建失败（不是陈旧产物），请按上面报错处理")
     elif cleaned:
         warn("清缓存未能执行、重建仍未通过：属真实构建失败；请确认 pnpm/tsx 可用后重试")
     else:
         warn("可先清缓存再重建（陈旧产物导致的缺导出/找不到模块，重跑普通构建无效）："
              "在 %s 执行 `pnpm run clean && pnpm run build`" % repo)
-    warn("重建前请确认 dsh web 已停止（文件锁会让构建写不进产物）")
+    if not invocation_defect:
+        warn("重建前请确认 dsh web 已停止（文件锁会让构建写不进产物）")
 
 
 def run(argv, settings):

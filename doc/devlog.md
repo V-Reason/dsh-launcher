@@ -6,6 +6,113 @@
 
 ---
 
+## 2026-09-25：DSH 0.1.7-rc.2 更新后构建失败——真机跑的是 `pnpm run run build`（复测全绿、真机全红）
+
+### 1. 背景
+
+用户把 DSH 从 `0.1.7-rc.1` 更新到 `0.1.7-rc.2`（仓库 HEAD `477b4f42`）后，`vdsh update dsh` 的代码合并
+与 `pnpm install` 都成功，**构建段全灭**（日志节选）：
+
+```text
+→ 版本 0.1.7-rc.1 → 0.1.7-rc.2：清缓存全量重建（避免残留旧产物）
+vdsh · 清理构建产物（各包 lib/ 与 tsbuildinfo）
+[ERR_PNPM_NO_SCRIPT] Missing script: run
+
+Command "run" not found.
+vdsh ⚠ 清缓存未完成（exit code 1）：继续按普通方式重建，失败诊断里会说明这一点
+[ERR_PNPM_NO_SCRIPT] Missing script: run
+
+Command "run" not found.
+…
+vdsh ⚠ 可先清缓存再重建（陈旧产物导致的缺导出/找不到模块，重跑普通构建无效）：
+        在 T:\deepseek-harness 执行 `pnpm run clean && pnpm run build`
+vdsh ✗ 构建失败（exit code 1）
+```
+
+两处都不对：① 构建**根本没跑起来**——报的是「没有 `run` 脚本」，而 vdsh 想跑的是 `clean`/`build`；
+② 诊断把用户指回**刚刚失败的那个动作**。用户按诊断手动执行后构建成功
+（`lib/.vdsh-build.json` 于 14:43:50 以 `origin=inferred` 记下 HEAD `477b4f42`），
+launcher 侧的缺陷仍在——不修则每次跨版本更新都会再来一遍。
+
+### 2. 根因（两处，都在 `features/build.py`）
+
+**(1) 命令拼装：字符串形式多补了一个 `run`。** `_pnpm_command`（2026-09-23 引入）按「路径形式要补
+`run`」实现，而调用方按「原样 argv」传 `("run", "build")`：
+
+| 形式 | 谁在用 | 调用方传 | 旧实现拼出 | 真机结果 |
+|---|---|---|---|---|
+| 路径字符串 | **真机**（`shutil.which("pnpm")` → `pnpm.CMD`） | `"run", "build"` | `pnpm run run build` | ✗ `ERR_PNPM_NO_SCRIPT Missing script: run` |
+| argv 列表 | **离线复测**（`[python, _fake_pnpm.py]`） | `"run", "build"` | `python _fake_pnpm.py run build` | ✓ 假 pnpm 正常应答 |
+
+两种形式行为不同，而只有列表形式被复测覆盖 → `_check_build_retry.py` 的 30+ 断言**全绿**、真机**全红**。
+真机 `pnpm run run build` 的双行报错（`Missing script: run` + `Command "run" not found.`）已用真 pnpm
+复现，与用户日志逐字一致。**与 DSH 0.1.7-rc.2 本身无关**（脚本 `build`/`clean` 都在，
+根 `package.json` 已核对），纯粹是 launcher 侧拼错了命令行。
+
+**(2) 诊断：`cleaned` 把「已尝试」记成了「清成功」。** `run_build` 里
+`cleaned = clean and clean_build(...)`：`--clean` 路径（**跨版本更新正是这条**）清缓存失败时
+`cleaned=False`，诊断于是落到「没清过」分支——把用户指回刚刚失败的动作。该变量在本模块的注释与
+重试分支里本来就是「**已尝试**」语义（重试分支显式 `cleaned = True`，不看 `clean_build` 成败），
+两处语义不一致。
+
+### 3. 改动清单
+
+1. `_pnpm_command`：两种形式**同构**，`args` 原样拼接，删除隐式补 `run`；docstring 写明事故与
+   「不要复活自动补 `run`」。
+2. `run_build`：`cleaned` 改为「已尝试」——`if clean: cleaned = True; clean_ok = clean_build(...)`。
+3. `missing_script()` + `PNPM_RUN_VERB` + 诊断三分支：从输出抓 pnpm 报缺的脚本名
+   （`Missing script: X` / `Command "X" not found.`，pnpm 11 双文案），与「本次**请求**的脚本」
+   及「vdsh 拼进去的子命令」对照：
+   - 报缺的**正是 vdsh 拼的子命令**（`run`）→ 判**命令拼装错误**（启动器缺陷、与仓库无关），
+     并**撤掉**清缓存建议与「dsh web 文件锁」提醒（与本次无关的噪声）；
+   - 报缺的**正是请求的脚本** → 提示核对仓库 `package.json` 的 scripts（下次 DSH 改脚本名时这条自己说话）；
+   - 其余（例如构建脚本内部对子包的调用报 `Missing script: bundle`）→ 同样指向 `package.json`，
+     但明确**不**归咎启动器——误判会把用户的排查方向带偏。
+4. `_check_build_cmd.py`（新增复测，gitignore 不入库）：见 §5。
+
+### 4. 关键决策与取舍
+
+- **修成「argv 原样」，而不是让 helper 拥有 `run`**（即调用方只传脚本名、由 helper 补 `run`）：
+  事故的成因是「隐式变换 + 两种形式不一致」。原样拼接可被肉眼核对（写下的就是执行的），
+  且只剩一条拼接路径，「两种形式行为不同」这一类不可能再出现。
+- **诊断加 missing-script 指纹，而不是加一句「也可能是拼装问题」**：两条互斥建议并列等于没有建议。
+  指纹的判据要**窄**：只有「报缺的名字正是 vdsh 自己拼进去的子命令」（`run`）才判启动器缺陷——
+  否则构建脚本内部对子包的调用（`Missing script: bundle`）会被诬告成启动器的问题，把排查方向带偏。
+- **不做「脚本名硬编码校验」**（例如启动时断言仓库 `package.json` 必须有 `build`）：那会把 DSH 的
+  正常改名变成启动器硬失败；用输出指纹区分，同时覆盖「仓库改名」这一真实可能。
+- **反向验证作为验收的一部分**：把 `_pnpm_command` 还原成旧实现，新用例 D 必红（实测 exit 3），
+  且诊断当场打出「命令拼装错误」——证明守卫拦得住**原缺陷**，而不是只拦得住我改过的那一行。
+
+### 5. 验证情况
+
+| 用例 | 内容 | 结果 |
+|---|---|---|
+| `python _check_build_cmd.py`（新增，43 断言） | A 两种形式同构 + `run` 恰好一个；B **AST 扫 `build.py` 每个调用点**逐个核对拼装结果、并核对子命令与 `PNPM_RUN_VERB` 一致；C **真机 pnpm** 复现 `run run build` → `Missing script: run`、`run build` → 正常执行；D **字符串 pnpm 端到端**（真 `pnpm.CMD` + 真脚本，走 `run_build` 的增量与 `--clean` 两条路）；E `--clean` 清缓存失败时的诊断；F missing-script 诊断三分支（含「子包脚本缺失不诬告启动器」）；末两条为工作区卫生（无 `.pnpm-store`、无本次 scratch 残留） | `✓ 全部通过（含真机 pnpm 端到端）` |
+| 反向验证（旧实现 + 真 pnpm） | 字符串形式拼出 `run run build` → exit 3、`Missing script: run`、诊断点出「命令拼装错误」 | 守卫有效 |
+| `python _check_build_retry.py`（30+ 断言） | 陈旧产物自愈、构建时效判定、启动侧、文案 | `✓ 全部通过` |
+| `python _check_ready_parse.py`（26 断言） | 就绪信号解析（上一轮修复） | `ALL PASS` |
+
+**未做**：在 `T:\deepseek-harness` 上真跑一次全量重建——仓库目录在沙箱工作区之外（写入 EPERM），
+且用户的 dsh web 正占用 3080（构建需先停服务）。终验放到**下一次 `vdsh update dsh`**，
+或用户空闲时 `vdsh build --clean`。
+
+### 6. 遗留与后续提示
+
+1. 复测入口现在是**两条**，都要跑：`python _check_build_cmd.py`（含真机 pnpm，需 PATH 里有 pnpm）
+   与 `python _check_build_retry.py`（纯离线）——前者管「真机形态」，后者管「自愈/时效判定」。
+2. `_fake_pnpm.py` 的注释写着「不入库」，但它已随 `98ada4f` 入库——保留：它是离线驱动，
+   且现在与真 pnpm 收同样的 argv。
+3. 通用教训写进 `experience.md` §7.7：**注入替身必须与真件同构**；只覆盖一种调用形式的复测等于
+   没覆盖，而「真机端到端跑一个 3 行真脚本」比十条替身断言更能拦住这类缺陷。
+4. 顺手修掉复测脚手架的两处卫生问题（本次跑真 pnpm 才暴露）：① 真 pnpm 会在**工作区根**建
+   `.pnpm-store/`（200+ 文件）→ 用例内用 `pnpm_config_store_dir` 指进 scratch；② `rmtree(..., ignore_errors=True)`
+   在只读文件（git 的 `.git/objects/*`）上**静默半途而废** → 换成清只读位再重试的 `rmtree()` 并把
+   「残留清单」纳入用例断言（实测工作区里积了 10 个 09-23 起就删不掉的旧目录）。
+   仍有 2 个**早期沙箱 ACL 实验**留下的目录（`probe-l9mdzx06`、`vdsh-build-check-24t4kg3g`）连枚举都
+   `WinError 5`，本机删不掉——已 gitignore，不影响功能；用例只核对「无本次残留」。
+
+---
+
 ## 2026-09-24：DSH 0.1.7-rc.1 后 `dsh web:` 就绪信号不再独占一行 → vdsh 空等到超时
 
 ### 1. 背景
